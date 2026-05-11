@@ -92,6 +92,25 @@ class AuthFacility extends Base {
     Object.assign(this._mfaHandlers, handlers)
   }
 
+  _validateRoles (roles) {
+    if (!Array.isArray(roles)) throw new Error('ERR_ROLES_INVALID')
+    const validRoles = Object.keys(this.conf.roles || {})
+    for (const role of roles) {
+      if (role === '*' || !validRoles.includes(role)) {
+        throw new Error('ERR_ROLES_INVALID')
+      }
+    }
+  }
+
+  async _requireSelfOrPerm (token, targetUserId, perm) {
+    const { userId } = await this._verifyToken(token)
+    if (userId === targetUserId) return userId
+    if (!this.tokenHasPerms(token, perm)) {
+      throw new Error('ERR_PERMISSION_DENIED')
+    }
+    return userId
+  }
+
   _validateTokenOpts ({ ips, userId, ttl, metadata, pfx, scope, roles }) {
     if (!Array.isArray(ips) || !ips.length || !ips.every(ip => isValidIp(ip))) {
       throw new Error('ERR_IPS_INVALID')
@@ -212,6 +231,8 @@ class AuthFacility extends Base {
       throw new Error('ERR_MISSING_ROLES')
     }
 
+    this._validateRoles(roles)
+
     const user = await this._sqlite.getAsync(
       'SELECT * FROM users WHERE email = ? LIMIT 1', email
     )
@@ -227,8 +248,10 @@ class AuthFacility extends Base {
     )
   }
 
-  async updateUser ({ token, email, name = null, roles = [], password = null }) {
-    const { userId } = await this._verifyToken(token)
+  async updateUser ({ token, targetUserId = null, currentPassword = null, email, name = null, roles = null, password = null }) {
+    const verified = await this._verifyToken(token)
+    const callerUserId = verified.userId
+    const userId = targetUserId ?? callerUserId
 
     const user = await this._sqlite.getAsync(
       'SELECT * FROM users WHERE id = ? LIMIT 1', userId
@@ -237,10 +260,33 @@ class AuthFacility extends Base {
       throw new Error('ERR_USER_NOT_FOUND')
     }
 
-    password = password ? await bcrypt.hash(password, this.conf.saltRounds || 10) : null
+    const isSelf = userId === callerUserId
+    const currentRoles = JSON.parse(user.roles || '[]')
+    const isRoleMutation = roles !== null && !isEqual(currentRoles.slice().sort(), roles.slice().sort())
+
+    if (roles !== null) this._validateRoles(roles)
+
+    if ((!isSelf || isRoleMutation) && !this.tokenHasPerms(token, 'user:rw')) {
+      throw new Error('ERR_PERMISSION_DENIED')
+    }
+
+    const requirePw = this.conf.requireCurrentPassword !== false && isSelf
+    if (requirePw && user.password) {
+      if (!currentPassword) throw new Error('ERR_CURRENT_PASSWORD_REQUIRED')
+      if (!await bcrypt.compare(currentPassword, user.password)) {
+        throw new Error('ERR_CURRENT_PASSWORD_INVALID')
+      }
+    }
+
+    const nextEmail = email ?? user.email
+    const nextName = name ?? user.name
+    const nextRoles = roles !== null ? JSON.stringify(roles) : user.roles
+    const nextPassword = password !== null
+      ? await bcrypt.hash(password, this.conf.saltRounds || 10)
+      : user.password
 
     await this._sqlite.runAsync(
-      'UPDATE users SET email = ?, name = ?, roles = ?, password = ? WHERE id = ?', [email, name, JSON.stringify(roles), password, userId]
+      'UPDATE users SET email = ?, name = ?, roles = ?, password = ? WHERE id = ?', [nextEmail, nextName, nextRoles, nextPassword, userId]
     )
 
     await this._deleteTokensOfUser(userId)

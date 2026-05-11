@@ -510,6 +510,126 @@ test('updateLastActive', async (t) => {
   t.is(typeof userAfter.lastActiveAt, 'number', 'lastActiveAt is a number')
 })
 
+test('C1: createUser rejects roles outside conf.roles and the "*" marker', async (t) => {
+  await t.exception(
+    async () => await authFac.createUser({ email: 'c1a@localhost', roles: ['nonexistent'] }),
+    /ERR_ROLES_INVALID/,
+    'rejects role not in conf.roles'
+  )
+
+  await t.exception(
+    async () => await authFac.createUser({ email: 'c1b@localhost', roles: ['*'] }),
+    /ERR_ROLES_INVALID/,
+    'rejects the "*" super-admin marker'
+  )
+
+  await t.exception(
+    async () => await authFac.createUser({ email: 'c1c@localhost', roles: ['user', '*'] }),
+    /ERR_ROLES_INVALID/,
+    'rejects "*" mixed with valid roles'
+  )
+})
+
+test('C1 + H4: updateUser role validation, permission gates, and currentPassword', async (t) => {
+  const password = 'OriginalPassword!1'
+  await authFac.createUser({ email: 'c1-victim@localhost', roles: ['user'], password })
+  const victim = await authFac._sqlite.getAsync(
+    'SELECT * FROM users WHERE email = ?', 'c1-victim@localhost'
+  )
+
+  // Privilege escalation attempt: victim with `user` role tries to set their own roles to '*'
+  const victimToken = await authFac.genToken({ ips: ['127.0.0.1'], userId: victim.id, roles: ['user'] })
+
+  await t.exception(
+    async () => await authFac.updateUser({
+      token: victimToken,
+      currentPassword: password,
+      email: 'c1-victim@localhost',
+      roles: ['*']
+    }),
+    /ERR_ROLES_INVALID/,
+    'rejects "*" in updateUser roles'
+  )
+
+  await t.exception(
+    async () => await authFac.updateUser({
+      token: victimToken,
+      currentPassword: password,
+      email: 'c1-victim@localhost',
+      roles: ['nonexistent']
+    }),
+    /ERR_ROLES_INVALID/,
+    'rejects unknown role in updateUser roles'
+  )
+
+  // Self-role-mutation to a different valid role still requires user:rw (`user` role has only jobs:rw)
+  await t.exception(
+    async () => await authFac.updateUser({
+      token: victimToken,
+      currentPassword: password,
+      email: 'c1-victim@localhost',
+      roles: ['admin']
+    }),
+    /ERR_PERMISSION_DENIED/,
+    'self role-mutation denied without user:rw permission'
+  )
+
+  // H4: a self-update without currentPassword is rejected when user.password is set
+  await t.exception(
+    async () => await authFac.updateUser({
+      token: victimToken,
+      email: 'c1-victim-new@localhost'
+    }),
+    /ERR_CURRENT_PASSWORD_REQUIRED/,
+    'requires currentPassword when user has password set'
+  )
+
+  // H4: wrong currentPassword is rejected
+  await t.exception(
+    async () => await authFac.updateUser({
+      token: victimToken,
+      currentPassword: 'WrongPassword!',
+      email: 'c1-victim-new@localhost'
+    }),
+    /ERR_CURRENT_PASSWORD_INVALID/,
+    'rejects wrong currentPassword'
+  )
+
+  // H4: correct currentPassword + non-role mutation succeeds
+  await t.execution(
+    async () => await authFac.updateUser({
+      token: victimToken,
+      currentPassword: password,
+      email: 'c1-victim-new@localhost'
+    }),
+    'self profile update succeeds with valid currentPassword'
+  )
+
+  // C1: a superadmin token (roles ['*']) CAN mutate target user's roles
+  const adminToken = await authFac.genToken({ ips: ['127.0.0.1'], userId: 1, roles: ['*'] })
+  await t.execution(
+    async () => await authFac.updateUser({
+      token: adminToken,
+      targetUserId: victim.id,
+      email: 'c1-victim-new@localhost',
+      roles: ['admin']
+    }),
+    'superadmin can update another user\'s roles'
+  )
+
+  // C1: a non-superadmin without user:rw can NOT update another user
+  const noPermsToken = await authFac.genToken({ ips: ['127.0.0.1'], userId: 2, roles: ['user'] })
+  await t.exception(
+    async () => await authFac.updateUser({
+      token: noPermsToken,
+      targetUserId: victim.id,
+      email: 'c1-victim-takeover@localhost'
+    }),
+    /ERR_PERMISSION_DENIED/,
+    'cross-user update denied without user:rw'
+  )
+})
+
 // ---------- JWT mode (conf.jwtSecret set) ----------
 
 const jwt = require('jsonwebtoken')
