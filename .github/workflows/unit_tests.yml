@@ -15,6 +15,11 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: 18.x
+        node-version: 22.x
     - run: npm install
     - run: npm test
+    # Surface runtime CVEs in CI logs. Set to critical to avoid breaking
+    # the build on transitive bcrypt build-chain issues (@mapbox/node-pre-gyp
+    # → tar) that do not affect production runtime.
+    - name: Audit runtime dependencies
+      run: npm audit --omit=dev --audit-level=critical
