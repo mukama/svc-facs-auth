@@ -169,7 +169,7 @@ class AuthFacility extends Base {
     if (roles.length) {
       strRoles = '-roles:' + roles.join(':')
     }
-    const token = `${pfx}:${scope}:${crypto.randomUUID()}-${userId}${strRoles}`
+    const token = `${pfx}:${scope}:${crypto.randomUUID()}${strRoles}`
 
     await this._sqlite.runAsync(
       'INSERT INTO auth_tokens(token, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
@@ -423,7 +423,7 @@ class AuthFacility extends Base {
   }
 
   async _getTokenFromDb (token) {
-    if (typeof token !== 'string' || /^[a-zA-Z0-9:\-]$/.test(token)) { //eslint-disable-line
+    if (typeof token !== 'string' || !/^pub:api:[a-f0-9-]{36}(?:-\d+)?(?:-roles:[a-z_*:]+)?$/.test(token)) {
       return null
     }
 

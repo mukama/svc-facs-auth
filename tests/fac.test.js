@@ -94,9 +94,9 @@ test('createToken', async (t) => {
     roles: ['normal_user']
   })
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:normal_user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:normal_user'
   // match all except uuid with regex
-  t.is(token.match(/pub:api:[a-z0-9-]*-2-roles:normal_user/)[0], token, 'valid token created')
+  t.is(token.match(/pub:api:[a-z0-9-]*-roles:normal_user/)[0], token, 'valid token created')
 })
 
 test('regenerateToken', async (t) => {
@@ -110,9 +110,9 @@ test('regenerateToken', async (t) => {
   // regenerate token with correct old token
   const newToken = await authFac.regenerateToken({ oldToken, roles: ['user', 'site_manager'] })
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
   // match all except uuid with regex
-  t.is(newToken.match(/pub:api:[a-z0-9-]*-2-roles:user:site_manager/)[0], newToken, 'valid token regenerated')
+  t.is(newToken.match(/pub:api:[a-z0-9-]*-roles:user:site_manager/)[0], newToken, 'valid token regenerated')
 
   // regenerate token with incorrect old token
   await t.exception(
@@ -327,9 +327,9 @@ test('authHandlers', async (t) => {
   // create a token with correct email and password
   const token = await authFac.authCallbackHandler('password', { email: 'test3@localhost', password: 'newpassword', ip: '127.0.0.1' })
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
   // match all except uuid with regex
-  t.is(token.match(/pub:api:[a-z0-9-]*-2-roles:user/)[0], token, 'valid token created with password auth handler')
+  t.is(token.match(/pub:api:[a-z0-9-]*-roles:user/)[0], token, 'valid token created with password auth handler')
 
   // throw error in wrong password
   await t.exception(
@@ -341,9 +341,9 @@ test('authHandlers', async (t) => {
   // create a valid token with non-password auth handler
   const token2 = await authFac.authCallbackHandler('nonPassword', { email: 'test3@localhost', ip: '127.0.0.1' })
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
   // match all except uuid with regex
-  t.is(token2.match(/pub:api:[a-z0-9-]*-2-roles:user/)[0], token2, 'valid token created with non-password auth handler')
+  t.is(token2.match(/pub:api:[a-z0-9-]*-roles:user/)[0], token2, 'valid token created with non-password auth handler')
 
   // create a token with incorrect email and password
   await t.exception(
@@ -508,6 +508,35 @@ test('updateLastActive', async (t) => {
   const userAfter = await authFac.getUserById(user.id)
   t.ok(userAfter.lastActiveAt, 'lastActiveAt is set after update')
   t.is(typeof userAfter.lastActiveAt, 'number', 'lastActiveAt is a number')
+})
+
+test('C2 + L2: legacy token format and regex validation', async (t) => {
+  // L2: new tokens have no userId in the suffix
+  const token = await authFac.genToken({
+    ips: ['127.0.0.1'],
+    userId: 9,
+    roles: ['user']
+  })
+  t.absent(/^pub:api:[a-f0-9-]{36}-9-roles:/.test(token), 'token suffix no longer embeds userId')
+  t.ok(/^pub:api:[a-f0-9-]{36}-roles:user$/.test(token), 'token matches new format pub:api:<uuid>-roles:<roles>')
+
+  // userId is still tracked in the auth_tokens row, not in the string
+  const row = await authFac._sqlite.getAsync('SELECT userId FROM auth_tokens WHERE token = ?', token)
+  t.is(row.userId, 9, 'userId stored in DB column, not parsed from token')
+
+  // C2: garbage tokens are rejected by _getTokenFromDb format check (returns null, not an error)
+  t.is(await authFac._getTokenFromDb('not-a-token'), null, 'rejects malformed token')
+  t.is(await authFac._getTokenFromDb('p'), null, 'rejects single-char token (old regex bug)')
+  t.is(await authFac._getTokenFromDb(''), null, 'rejects empty token')
+  t.is(await authFac._getTokenFromDb(null), null, 'rejects non-string token')
+
+  // C2: backward-compat — regex still accepts the legacy "with userId" form
+  await authFac._sqlite.runAsync(
+    'INSERT INTO auth_tokens(token, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
+    ['pub:api:11111111-2222-3333-4444-555555555555-7-roles:user', 9, JSON.stringify(['127.0.0.1']), JSON.stringify({}), Math.floor(Date.now() / 1000), 3000]
+  )
+  const legacyRow = await authFac._getTokenFromDb('pub:api:11111111-2222-3333-4444-555555555555-7-roles:user')
+  t.ok(legacyRow, 'legacy token format still readable from DB (transition compatibility)')
 })
 
 test('C1: createUser rejects roles outside conf.roles and the "*" marker', async (t) => {
