@@ -542,6 +542,30 @@ test('updateLastActive', async (t) => {
   t.is(typeof userAfter.lastActiveAt, 'number', 'lastActiveAt is a number')
 })
 
+test('L4: bounded LRU helper evicts when full', (t) => {
+  const lruFactory = require('./helper/lru.fac')
+  const lru = lruFactory({ max: 2 })
+
+  lru.set('a', 1)
+  lru.set('b', 2)
+  lru.set('c', 3) // evicts oldest ('a')
+
+  t.is(lru.get('a'), undefined, 'oldest entry evicted at capacity')
+  t.is(lru.get('b'), 2, 'middle entry kept')
+  t.is(lru.get('c'), 3, 'newest entry kept')
+
+  // touching 'b' should bump it; setting a new key evicts the now-oldest 'c'
+  lru.get('b')
+  lru.set('d', 4)
+  t.is(lru.get('c'), undefined, 'oldest after touch evicted')
+  t.is(lru.get('b'), 2, 'recently-touched entry kept')
+  t.is(lru.get('d'), 4, 'new entry kept')
+
+  // cache.maxAge is exposed so _assertTtlCoveredByLru can read it
+  const lru2 = lruFactory({ maxAge: 60000 })
+  t.is(lru2.cache.maxAge, 60000, 'cache.maxAge exposed for boot-time assertion')
+})
+
 test('M4: createUser / updateUser enforce password policy', async (t) => {
   // default policy is minLength: 8
   await t.exception(
