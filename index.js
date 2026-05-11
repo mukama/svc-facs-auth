@@ -528,7 +528,7 @@ class AuthFacility extends Base {
     if (info.password) delete info.password
     if (user.password) delete user.password
     const metadata = { ...info, ...user }
-    const ips = extractIps(req)
+    const ips = extractIps(req, this.conf.trustProxy)
 
     const roles = []
     if (metadata.roles?.length) {

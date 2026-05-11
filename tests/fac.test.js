@@ -324,8 +324,10 @@ test('authHandlers', async (t) => {
     }
   })
 
+  const reqWithSocket = (body) => ({ ...body, socket: { remoteAddress: '127.0.0.1' } })
+
   // create a token with correct email and password
-  const token = await authFac.authCallbackHandler('password', { email: 'test3@localhost', password: 'newpassword', ip: '127.0.0.1' })
+  const token = await authFac.authCallbackHandler('password', reqWithSocket({ email: 'test3@localhost', password: 'newpassword' }))
 
   // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
   // match all except uuid with regex
@@ -333,13 +335,13 @@ test('authHandlers', async (t) => {
 
   // throw error in wrong password
   await t.exception(
-    async () => await authFac.authCallbackHandler('password', { email: 'test3@localhost', password: 'incorrect', ip: '127.0.0.1' }),
+    async () => await authFac.authCallbackHandler('password', reqWithSocket({ email: 'test3@localhost', password: 'incorrect' })),
     /ERR_PASSWORD_INVALID/,
     'throw error on incorrect password'
   )
 
   // create a valid token with non-password auth handler
-  const token2 = await authFac.authCallbackHandler('nonPassword', { email: 'test3@localhost', ip: '127.0.0.1' })
+  const token2 = await authFac.authCallbackHandler('nonPassword', reqWithSocket({ email: 'test3@localhost' }))
 
   // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
   // match all except uuid with regex
@@ -347,7 +349,7 @@ test('authHandlers', async (t) => {
 
   // create a token with incorrect email and password
   await t.exception(
-    async () => await authFac.authCallbackHandler('password', { email: 'test100@localhost', password: 'incorrect', ip: '127.0.0.1' }),
+    async () => await authFac.authCallbackHandler('password', reqWithSocket({ email: 'test100@localhost', password: 'incorrect' })),
     /ERR_USER_INVALID/,
     'throw error on incorrect email and password'
   )

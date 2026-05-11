@@ -12,12 +12,25 @@ test('utils', async (t) => {
     t.is(typeof resp, 'number', 'returns a Number')
   })
 
-  t.test('extractIps', async (t) => {
-    t.alike(extractIps({ headers: { 'x-forwarded-for': '127.0.0.1' } }), ['127.0.0.1'], 'reads IP from x-forwarded-for')
-    t.alike(extractIps({ ip: '1.1.1.1' }), ['1.1.1.1'], 'reads IP from req.ip')
-    t.alike(extractIps({ ips: ['1.1.1.1', '2.2.2.2'] }), ['1.1.1.1', '2.2.2.2'], 'reads IP from req.ips')
+  t.test('extractIps (default: trustProxy=false, socket only)', async (t) => {
     t.alike(extractIps({ socket: { remoteAddress: '3.3.3.3' } }), ['3.3.3.3'], 'reads IP from req.socket.remoteAddress')
-    t.exception(() => extractIps({}), 'ERR_IP_RESOLVE_FAIL', 'throws if no IP found')
+
+    // C3: spoofed X-Forwarded-For is ignored by default
+    const spoofed = {
+      headers: { 'x-forwarded-for': '1.2.3.4' },
+      ip: '5.6.7.8',
+      ips: ['9.9.9.9'],
+      socket: { remoteAddress: '127.0.0.1' }
+    }
+    t.alike(extractIps(spoofed), ['127.0.0.1'], 'ignores headers/req.ip when trustProxy=false')
+
+    t.exception(() => extractIps({}), /ERR_IP_RESOLVE_FAIL/, 'throws if socket.remoteAddress missing')
+    t.exception(() => extractIps({ ip: '1.1.1.1' }), /ERR_IP_RESOLVE_FAIL/, 'req.ip alone is not enough when trustProxy=false')
+  })
+
+  t.test('extractIps (trustProxy=true: use framework-resolved req.ip)', async (t) => {
+    t.alike(extractIps({ ip: '1.1.1.1' }, true), ['1.1.1.1'], 'reads IP from req.ip when trustProxy=true')
+    t.exception(() => extractIps({ socket: { remoteAddress: '3.3.3.3' } }, true), /ERR_IP_RESOLVE_FAIL/, 'trustProxy=true requires req.ip, not socket')
   })
 
   t.test('isValidIp', async (t) => {
