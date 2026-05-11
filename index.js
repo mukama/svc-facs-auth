@@ -104,16 +104,30 @@ class AuthFacility extends Base {
   }
 
   async _updateDbFromSchema () {
-    // parse tables schema
+    // M3: build the whitelist of legal identifiers from the hardcoded
+    // TABLES schema, then assert every interpolated name is in it. The
+    // values come from a static module today; the whitelist is defence
+    // in depth in case anyone later sources TABLES dynamically.
     const schema = TABLES.map(sql => parseSql(sql))
+    const validNames = new Set()
     for (const { table, columns } of schema) {
-      // Get existing columns from database
+      validNames.add(table)
+      for (const col of Object.keys(columns)) validNames.add(col)
+    }
+    const assertIdent = (n) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n) || !validNames.has(n)) {
+        throw new Error('ERR_SCHEMA_INVALID_IDENTIFIER')
+      }
+    }
+
+    for (const { table, columns } of schema) {
+      assertIdent(table)
       const existingColumns = await this._sqlite.allAsync(`PRAGMA table_info(${table})`)
       const existingColumnNames = existingColumns.map(col => col.name)
 
-      // Check each expected column and add if missing
       for (const [columnName, columnDef] of Object.entries(columns)) {
         if (!existingColumnNames.includes(columnName)) {
+          assertIdent(columnName)
           await this._sqlite.execAsync(`ALTER TABLE ${table} ADD COLUMN ${columnDef}`)
         }
       }
