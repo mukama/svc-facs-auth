@@ -15,7 +15,8 @@ const lruKeys = {
   userJtis: (userId) => `user-jtis:${userId}`,
   jtiData: (jti) => `jti-data:${jti}`,
   goTokens: (token) => `gotokens:${token}`,
-  userRoles: (userId) => `user-roles:${userId}`
+  userRoles: (userId) => `user-roles:${userId}`,
+  mfaCsrf: (csrf) => `mfa-csrf:${csrf}`
 }
 
 class AuthFacility extends Base {
@@ -28,6 +29,7 @@ class AuthFacility extends Base {
 
     this._authHandlers = {}
     this._mfaHandlers = {}
+    this._mfaCompleteHandlers = {}
 
     this._hasConf = true
 
@@ -91,6 +93,10 @@ class AuthFacility extends Base {
 
   addMfaHandlers (handlers) {
     Object.assign(this._mfaHandlers, handlers)
+  }
+
+  addMfaCompleteHandlers (handlers) {
+    Object.assign(this._mfaCompleteHandlers, handlers)
   }
 
   _validateRoles (roles) {
@@ -511,7 +517,7 @@ class AuthFacility extends Base {
 
     if (mfaMethods && mfaMethods.length > 0) {
       const csrfToken = crypto.randomUUID()
-      this._lru.set(csrfToken, token)
+      this._lru.set(lruKeys.mfaCsrf(csrfToken), { token, createdAt: Date.now() })
 
       return {
         csrf_token: csrfToken,
@@ -521,6 +527,28 @@ class AuthFacility extends Base {
     }
 
     return { token }
+  }
+
+  async mfaCompleteHandler (csrfToken, factor, proof) {
+    const key = lruKeys.mfaCsrf(csrfToken)
+    const entry = this._lru.get(key)
+    // Always consume the csrf_token entry — single-use, even on factor failure
+    if (entry) this._lru.remove(key)
+
+    const ttlMs = (this.conf.mfaCsrfTtl || 300) * 1000
+    if (!entry || (Date.now() - entry.createdAt) > ttlMs) {
+      throw new Error('ERR_MFA_CSRF_INVALID')
+    }
+
+    const handler = this._mfaCompleteHandlers[factor]
+    if (!handler || typeof handler !== 'function') {
+      throw new Error('ERR_HANDLER_INVALID')
+    }
+
+    const ok = await handler(this.caller, csrfToken, proof)
+    if (!ok) throw new Error('ERR_MFA_FACTOR_INVALID')
+
+    return { token: entry.token }
   }
 
   async authCallbackHandler (type, req) {

@@ -1,6 +1,7 @@
 'use strict'
 
 const test = require('brittle')
+const crypto = require('crypto')
 const { promiseSleep } = require('@bitfinex/lib-js-util-promise')
 const { omit } = require('@bitfinexcom/lib-js-util-base')
 const async = require('async')
@@ -405,7 +406,10 @@ test('mfaCallbackHandler', async t => {
   t.ok(resultSome.csrf_token)
   t.is(resultSome.mfa_required, true)
   t.alike(resultSome.mfa_methods, ['totp', 'passkey'])
-  t.is(authFac._lru.get(resultSome.csrf_token), 'token456')
+  // H5: csrf_token entry is now namespaced and wraps the token with a createdAt timestamp
+  const csrfEntry = authFac._lru.get(`mfa-csrf:${resultSome.csrf_token}`)
+  t.is(csrfEntry.token, 'token456')
+  t.ok(typeof csrfEntry.createdAt === 'number')
 
   // Invalid getUserMfaMethods
   authFac.authCallbackHandler = async () => 'token789'
@@ -531,6 +535,65 @@ test('updateLastActive', async (t) => {
   const userAfter = await authFac.getUserById(user.id)
   t.ok(userAfter.lastActiveAt, 'lastActiveAt is set after update')
   t.is(typeof userAfter.lastActiveAt, 'number', 'lastActiveAt is a number')
+})
+
+test('H5: mfaCompleteHandler enforces single-use csrf_token, TTL, and factor proof', async (t) => {
+  authFac.addMfaCompleteHandlers({
+    totp: async (ctx, csrf, proof) => proof === '123456'
+  })
+
+  const issue = () => {
+    const csrfToken = crypto.randomUUID()
+    authFac._lru.set(`mfa-csrf:${csrfToken}`, { token: 'final-bearer', createdAt: Date.now() })
+    return csrfToken
+  }
+
+  // (1) Wrong factor proof — single-use entry consumed, returns ERR_MFA_FACTOR_INVALID
+  const csrf1 = issue()
+  await t.exception(
+    async () => await authFac.mfaCompleteHandler(csrf1, 'totp', 'wrong'),
+    /ERR_MFA_FACTOR_INVALID/,
+    'wrong proof rejected'
+  )
+  t.absent(authFac._lru.get(`mfa-csrf:${csrf1}`), 'csrf entry consumed even on factor failure')
+
+  // (2) Replay of the same csrf_token (now consumed) fails with ERR_MFA_CSRF_INVALID
+  await t.exception(
+    async () => await authFac.mfaCompleteHandler(csrf1, 'totp', '123456'),
+    /ERR_MFA_CSRF_INVALID/,
+    'replay after consumption rejected'
+  )
+
+  // (3) Unknown csrf_token is rejected
+  await t.exception(
+    async () => await authFac.mfaCompleteHandler('00000000-0000-0000-0000-000000000000', 'totp', '123456'),
+    /ERR_MFA_CSRF_INVALID/,
+    'unknown csrf_token rejected'
+  )
+
+  // (4) Expired csrf_token (createdAt older than mfaCsrfTtl) is rejected
+  const csrf4 = crypto.randomUUID()
+  authFac._lru.set(`mfa-csrf:${csrf4}`, { token: 'stale', createdAt: Date.now() - 10 * 60 * 1000 })
+  await t.exception(
+    async () => await authFac.mfaCompleteHandler(csrf4, 'totp', '123456'),
+    /ERR_MFA_CSRF_INVALID/,
+    'expired csrf_token rejected'
+  )
+
+  // (5) Happy path — correct proof releases the bearer token
+  const csrf5 = issue()
+  const result = await authFac.mfaCompleteHandler(csrf5, 'totp', '123456')
+  t.is(result.token, 'final-bearer', 'returns the stashed bearer token')
+  t.absent(authFac._lru.get(`mfa-csrf:${csrf5}`), 'csrf entry consumed on success')
+
+  // (6) Unknown factor — ERR_HANDLER_INVALID (not the same code as csrf/proof issues so the
+  //     caller can distinguish configuration errors from auth failures)
+  const csrf6 = issue()
+  await t.exception(
+    async () => await authFac.mfaCompleteHandler(csrf6, 'passkey', 'whatever'),
+    /ERR_HANDLER_INVALID/,
+    'unregistered factor handler throws'
+  )
 })
 
 test('H3: auth failures collapse to ERR_AUTH_FAIL; dummy hash is initialised', async (t) => {
