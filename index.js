@@ -655,6 +655,26 @@ class AuthFacility extends Base {
     return true
   }
 
+  async revokeToken (token) {
+    let verified
+    try {
+      verified = await this._verifyToken(token)
+    } catch {
+      return false
+    }
+    if (this._isJwtMode) {
+      this._revokeJwtToken(verified.userId, verified.jti)
+    } else {
+      this._lru.remove(lruKeys.goTokens(token))
+      await this._sqlite.runAsync('DELETE FROM auth_tokens WHERE token = ?', token)
+    }
+    return true
+  }
+
+  async revokeAllForUser (userId) {
+    await this._deleteTokensOfUser(userId)
+  }
+
   async _deleteTokensOfUser (id) {
     if (this._isJwtMode) return this._revokeJwtUserTokens(id)
     return this._revokeDbUserTokens(id)

@@ -537,6 +537,31 @@ test('updateLastActive', async (t) => {
   t.is(typeof userAfter.lastActiveAt, 'number', 'lastActiveAt is a number')
 })
 
+test('M7: revokeToken + revokeAllForUser invalidate sessions', async (t) => {
+  await authFac.createUser({ email: 'm7@localhost', roles: ['user'] })
+  const user = await authFac._sqlite.getAsync('SELECT * FROM users WHERE email = ?', 'm7@localhost')
+
+  // revokeToken: single-token revocation
+  const t1 = await authFac.genToken({ ips: ['127.0.0.1'], userId: user.id, roles: ['user'] })
+  t.ok(await authFac.resolveToken(t1, ['127.0.0.1']), 'token resolves before revoke')
+  t.is(await authFac.revokeToken(t1), true, 'revokeToken returns true on success')
+  t.is(await authFac.resolveToken(t1, ['127.0.0.1']), null, 'token no longer resolves after revoke')
+
+  // revokeToken is idempotent — calling it on an already-revoked token is a no-op
+  t.is(await authFac.revokeToken(t1), false, 'revokeToken returns false on already-revoked token')
+  t.is(await authFac.revokeToken('not-a-real-token'), false, 'revokeToken returns false on malformed token')
+
+  // revokeAllForUser: mass revocation
+  const tokens = []
+  for (let i = 0; i < 3; i++) {
+    tokens.push(await authFac.genToken({ ips: ['127.0.0.1'], userId: user.id, roles: ['user'] }))
+  }
+  for (const tk of tokens) t.ok(await authFac.resolveToken(tk, ['127.0.0.1']), 'token live before mass revoke')
+
+  await authFac.revokeAllForUser(user.id)
+  for (const tk of tokens) t.is(await authFac.resolveToken(tk, ['127.0.0.1']), null, 'token revoked by revokeAllForUser')
+})
+
 test('H5: mfaCompleteHandler enforces single-use csrf_token, TTL, and factor proof', async (t) => {
   authFac.addMfaCompleteHandlers({
     totp: async (ctx, csrf, proof) => proof === '123456'
