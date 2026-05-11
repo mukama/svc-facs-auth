@@ -189,7 +189,7 @@ class AuthFacility extends Base {
     this._lru.set(lruKeys.userJtis(userId), jtis)
   }
 
-  async regenerateToken ({ oldToken, ips = null, pfx = 'pub', scope = 'api', roles = [] }) {
+  async regenerateToken ({ oldToken, ips = null, req = null, pfx = 'pub', scope = 'api', roles = [] }) {
     let old
     try {
       old = await this._verifyToken(oldToken)
@@ -197,7 +197,14 @@ class AuthFacility extends Base {
       throw new Error('ERR_OLD_TOKEN_INVALID', { cause: err })
     }
 
-    ips = ips || old.ips
+    if (!ips && req) ips = extractIps(req, this.conf.trustProxy)
+    if (!Array.isArray(ips) || !ips.length) {
+      throw new Error('ERR_IPS_REQUIRED')
+    }
+    if (!ips.some(ip => old.ips.includes(ip))) {
+      throw new Error('ERR_IP_MISMATCH')
+    }
+
     const userId = old.userId
     const oldRoles = this._extractRoles(old, oldToken)
 

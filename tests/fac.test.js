@@ -108,7 +108,7 @@ test('regenerateToken', async (t) => {
   })
 
   // regenerate token with correct old token
-  const newToken = await authFac.regenerateToken({ oldToken, roles: ['user', 'site_manager'] })
+  const newToken = await authFac.regenerateToken({ oldToken, ips: ['127.0.0.1'], roles: ['user', 'site_manager'] })
 
   // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
   // match all except uuid with regex
@@ -116,16 +116,37 @@ test('regenerateToken', async (t) => {
 
   // regenerate token with incorrect old token
   await t.exception(
-    async () => await authFac.regenerateToken({ oldToken: 'incorrect' }),
+    async () => await authFac.regenerateToken({ oldToken: 'incorrect', ips: ['127.0.0.1'] }),
     /ERR_OLD_TOKEN_INVALID/,
     'throw error on incorrect old token'
   )
 
   // regenerate token with incorrect roles
   await t.exception(
-    async () => await authFac.regenerateToken({ oldToken, roles: ['admin'] }),
+    async () => await authFac.regenerateToken({ oldToken, ips: ['127.0.0.1'], roles: ['admin'] }),
     /ERR_ROLES_INVALID/,
     'throw error on incorrect roles'
+  )
+
+  // H1: regenerate from a non-bound IP is rejected
+  await t.exception(
+    async () => await authFac.regenerateToken({ oldToken, ips: ['8.8.8.8'], roles: ['user'] }),
+    /ERR_IP_MISMATCH/,
+    'throw error when calling IP not in token binding'
+  )
+
+  // H1: regenerate without ips and without req is rejected
+  await t.exception(
+    async () => await authFac.regenerateToken({ oldToken, roles: ['user'] }),
+    /ERR_IPS_REQUIRED/,
+    'throw error when neither ips nor req supplied'
+  )
+
+  // H1: req-derived IP path works
+  const reqOk = { socket: { remoteAddress: '127.0.0.1' } }
+  await t.execution(
+    async () => await authFac.regenerateToken({ oldToken, req: reqOk, roles: ['user'] }),
+    'derives IP from req via extractIps + trustProxy'
   )
 
   const oldSuperAdminToken = await authFac.genToken({
@@ -136,7 +157,7 @@ test('regenerateToken', async (t) => {
 
   // regenerate token with super admin role
   await t.execution(
-    async () => await authFac.regenerateToken({ oldToken: oldSuperAdminToken, roles: ['*'] }),
+    async () => await authFac.regenerateToken({ oldToken: oldSuperAdminToken, ips: ['127.0.0.1'], roles: ['*'] }),
     'valid super admin token regenerated'
   )
 })
@@ -772,7 +793,7 @@ test('jwt: regenerateToken revokes the old jti', async (t) => {
   })
   const oldJti = jwt.verify(oldToken, JWT_SECRET).jti
 
-  const newToken = await jwtAuthFac.regenerateToken({ oldToken, roles: ['user'] })
+  const newToken = await jwtAuthFac.regenerateToken({ oldToken, ips: ['127.0.0.1'], roles: ['user'] })
   const newJti = jwt.verify(newToken, JWT_SECRET).jti
 
   t.not(newJti, oldJti, 'new token has a different jti')
