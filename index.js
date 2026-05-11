@@ -414,8 +414,20 @@ class AuthFacility extends Base {
     await this._deleteTokensOfUser(userId)
   }
 
-  async compareUser ({ token, email = null, name = null, roles = null, password = null }) {
-    const { userId } = await this._verifyToken(token)
+  /**
+   * Compare fields against the caller's own user record by default.
+   * Pass an explicit targetUserId to compare against another user — the
+   * caller must hold `user:r` to do so. Without targetUserId, scope is
+   * implicit (self) and no extra permission is required.
+   */
+  async compareUser ({ token, targetUserId = null, email = null, name = null, roles = null, password = null }) {
+    const verified = await this._verifyToken(token)
+    const callerUserId = verified.userId
+    const userId = targetUserId ?? callerUserId
+
+    if (userId !== callerUserId && !(await this.tokenHasPerms(token, 'user:r'))) {
+      throw new Error('ERR_PERMISSION_DENIED')
+    }
 
     const dbUser = await this._sqlite.getAsync('SELECT * FROM users WHERE id = ? LIMIT 1', userId)
     if (!dbUser) {
