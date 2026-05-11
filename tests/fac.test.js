@@ -432,12 +432,17 @@ test('cleanupTokens', async (t) => {
     ttl: 5
   })
 
-  // check if token is created
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex')
+
+  // check if token is created (stored as token_hash, not raw)
   let authTokens = await authFac._sqlite.allAsync(
-    'SELECT * FROM auth_tokens WHERE token = ?', token
+    'SELECT * FROM auth_tokens WHERE token_hash = ?', tokenHash
   )
 
   t.is(authTokens.length, 1, 'token created')
+
+  // M1: ensure the raw token is NOT stored anywhere in the row
+  t.absent(JSON.stringify(authTokens[0]).includes(token), 'raw token not persisted in DB')
 
   // wait 6s and cleanup tokens
   await promiseSleep(6000)
@@ -445,7 +450,7 @@ test('cleanupTokens', async (t) => {
 
   // check if token is deleted
   authTokens = await authFac._sqlite.allAsync(
-    'SELECT * FROM auth_tokens WHERE token = ?', token
+    'SELECT * FROM auth_tokens WHERE token_hash = ?', tokenHash
   )
 
   t.is(authTokens.length, 0, 'token deleted')
@@ -698,7 +703,8 @@ test('C2 + L2: legacy token format and regex validation', async (t) => {
   t.ok(/^pub:api:[a-f0-9-]{36}-roles:user$/.test(token), 'token matches new format pub:api:<uuid>-roles:<roles>')
 
   // userId is still tracked in the auth_tokens row, not in the string
-  const row = await authFac._sqlite.getAsync('SELECT userId FROM auth_tokens WHERE token = ?', token)
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex')
+  const row = await authFac._sqlite.getAsync('SELECT userId FROM auth_tokens WHERE token_hash = ?', tokenHash)
   t.is(row.userId, 9, 'userId stored in DB column, not parsed from token')
 
   // C2: garbage tokens are rejected by _getTokenFromDb format check (returns null, not an error)
@@ -708,11 +714,13 @@ test('C2 + L2: legacy token format and regex validation', async (t) => {
   t.is(await authFac._getTokenFromDb(null), null, 'rejects non-string token')
 
   // C2: backward-compat — regex still accepts the legacy "with userId" form
+  const legacyToken = 'pub:api:11111111-2222-3333-4444-555555555555-7-roles:user'
+  const legacyHash = crypto.createHash('sha256').update(legacyToken).digest('hex')
   await authFac._sqlite.runAsync(
-    'INSERT INTO auth_tokens(token, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
-    ['pub:api:11111111-2222-3333-4444-555555555555-7-roles:user', 9, JSON.stringify(['127.0.0.1']), JSON.stringify({}), Math.floor(Date.now() / 1000), 3000]
+    'INSERT INTO auth_tokens(token_hash, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
+    [legacyHash, 9, JSON.stringify(['127.0.0.1']), JSON.stringify({}), Math.floor(Date.now() / 1000), 3000]
   )
-  const legacyRow = await authFac._getTokenFromDb('pub:api:11111111-2222-3333-4444-555555555555-7-roles:user')
+  const legacyRow = await authFac._getTokenFromDb(legacyToken)
   t.ok(legacyRow, 'legacy token format still readable from DB (transition compatibility)')
 })
 

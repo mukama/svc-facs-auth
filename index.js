@@ -40,10 +40,26 @@ class AuthFacility extends Base {
     return !!this.conf.jwtSecret
   }
 
+  _hashToken (token) {
+    return crypto.createHash('sha256').update(token).digest('hex')
+  }
+
   async _initDb () {
     await async.mapSeries(TABLES, async (tbl) => {
       await this._sqlite.execAsync(tbl)
     })
+
+    // M1 migration: if auth_tokens still carries the legacy `token` column
+    // (pre-M1 plaintext storage), drop and recreate with the token_hash
+    // schema. Any in-flight legacy-mode tokens are invalidated — clients
+    // re-authenticate on next call. JWT-mode deployments are unaffected
+    // (auth_tokens is unused).
+    const authTokensCols = await this._sqlite.allAsync('PRAGMA table_info(auth_tokens)')
+    if (authTokensCols.find(c => c.name === 'token')) {
+      await this._sqlite.execAsync('DROP TABLE auth_tokens')
+      const authTokensSchema = TABLES.find(t => t.includes('CREATE TABLE IF NOT EXISTS auth_tokens'))
+      await this._sqlite.execAsync(authTokensSchema)
+    }
 
     // update existing db if schema updated
     await this._updateDbFromSchema()
@@ -193,8 +209,8 @@ class AuthFacility extends Base {
     const token = `${pfx}:${scope}:${crypto.randomUUID()}${strRoles}`
 
     await this._sqlite.runAsync(
-      'INSERT INTO auth_tokens(token, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
-      [token, userId, JSON.stringify(ips), JSON.stringify(metadata), dateNowSec(), ttl]
+      'INSERT INTO auth_tokens(token_hash, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
+      [this._hashToken(token), userId, JSON.stringify(ips), JSON.stringify(metadata), dateNowSec(), ttl]
     )
 
     return token
@@ -472,13 +488,14 @@ class AuthFacility extends Base {
       return null
     }
 
-    const ckey = lruKeys.goTokens(token)
+    const hash = this._hashToken(token)
+    const ckey = lruKeys.goTokens(hash)
     let res = this._lru.get(ckey)
 
     if (!res) {
       res = await this._sqlite.getAsync(
-        'SELECT * FROM auth_tokens WHERE token = ? LIMIT 1',
-        token)
+        'SELECT * FROM auth_tokens WHERE token_hash = ? LIMIT 1',
+        hash)
 
       if (res) {
         res.metadata = res.metadata ? JSON.parse(res.metadata) : {}
@@ -665,8 +682,9 @@ class AuthFacility extends Base {
     if (this._isJwtMode) {
       this._revokeJwtToken(verified.userId, verified.jti)
     } else {
-      this._lru.remove(lruKeys.goTokens(token))
-      await this._sqlite.runAsync('DELETE FROM auth_tokens WHERE token = ?', token)
+      const hash = this._hashToken(token)
+      this._lru.remove(lruKeys.goTokens(hash))
+      await this._sqlite.runAsync('DELETE FROM auth_tokens WHERE token_hash = ?', hash)
     }
     return true
   }
@@ -699,11 +717,11 @@ class AuthFacility extends Base {
   }
 
   async _revokeDbUserTokens (userId) {
-    const tokens = await this._sqlite.allAsync(
-      'SELECT * from auth_tokens WHERE userId=?', [userId]
+    const rows = await this._sqlite.allAsync(
+      'SELECT token_hash from auth_tokens WHERE userId=?', [userId]
     )
 
-    tokens.forEach(({ token }) => this._lru.remove(lruKeys.goTokens(token)))
+    rows.forEach(row => this._lru.remove(lruKeys.goTokens(row.token_hash)))
 
     await this._sqlite.allAsync(
       'DELETE from auth_tokens WHERE userId=?', [userId]
