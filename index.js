@@ -549,16 +549,19 @@ class AuthFacility extends Base {
       'SELECT * FROM users WHERE email = ? LIMIT 1', info.email
     )
     if (!user) {
-      throw new Error('ERR_USER_INVALID')
+      // constant-time: equalise with the wrong-password branch below
+      await bcrypt.compare(info.password || '', this._dummyHash)
+      throw new Error('ERR_AUTH_FAIL')
     }
 
     // check if password matches
     if (info.password) {
       if (!user.password) {
-        throw new Error('ERR_PASSWORD_NOT_SET')
+        await bcrypt.compare(info.password, this._dummyHash)
+        throw new Error('ERR_AUTH_FAIL')
       }
       if (!await bcrypt.compare(info.password, user.password)) {
-        throw new Error('ERR_PASSWORD_INVALID')
+        throw new Error('ERR_AUTH_FAIL')
       }
     }
 
@@ -675,6 +678,7 @@ class AuthFacility extends Base {
       async () => {
         await this._initDb()
         this._assertTtlCoveredByLru()
+        this._dummyHash = await bcrypt.hash(crypto.randomUUID(), this.conf.saltRounds || 10)
       }
     ], cb)
   }

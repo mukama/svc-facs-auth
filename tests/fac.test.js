@@ -354,10 +354,10 @@ test('authHandlers', async (t) => {
   // match all except uuid with regex
   t.is(token.match(/pub:api:[a-z0-9-]*-roles:user/)[0], token, 'valid token created with password auth handler')
 
-  // throw error in wrong password
+  // throw error in wrong password (H3: collapsed to ERR_AUTH_FAIL)
   await t.exception(
     async () => await authFac.authCallbackHandler('password', reqWithSocket({ email: 'test3@localhost', password: 'incorrect' })),
-    /ERR_PASSWORD_INVALID/,
+    /ERR_AUTH_FAIL/,
     'throw error on incorrect password'
   )
 
@@ -368,10 +368,10 @@ test('authHandlers', async (t) => {
   // match all except uuid with regex
   t.is(token2.match(/pub:api:[a-z0-9-]*-roles:user/)[0], token2, 'valid token created with non-password auth handler')
 
-  // create a token with incorrect email and password
+  // create a token with incorrect email and password (H3: collapsed to ERR_AUTH_FAIL)
   await t.exception(
     async () => await authFac.authCallbackHandler('password', reqWithSocket({ email: 'test100@localhost', password: 'incorrect' })),
-    /ERR_USER_INVALID/,
+    /ERR_AUTH_FAIL/,
     'throw error on incorrect email and password'
   )
 })
@@ -531,6 +531,50 @@ test('updateLastActive', async (t) => {
   const userAfter = await authFac.getUserById(user.id)
   t.ok(userAfter.lastActiveAt, 'lastActiveAt is set after update')
   t.is(typeof userAfter.lastActiveAt, 'number', 'lastActiveAt is a number')
+})
+
+test('H3: auth failures collapse to ERR_AUTH_FAIL; dummy hash is initialised', async (t) => {
+  // _dummyHash is seeded at _start
+  t.ok(typeof authFac._dummyHash === 'string' && authFac._dummyHash.startsWith('$2'), 'dummy bcrypt hash initialised at _start')
+
+  authFac.addHandlers({
+    'h3-pw': (ctx, req) => {
+      if (!req.email) throw new Error('ERR_MISSING_EMAIL')
+      return req
+    }
+  })
+
+  // user with a password set
+  const password = 'H3-known-password!1'
+  await authFac.createUser({ email: 'h3-known@localhost', roles: ['user'], password })
+
+  // user without a password
+  await authFac.createUser({ email: 'h3-nopass@localhost', roles: ['user'] })
+
+  const req = (body) => ({ ...body, socket: { remoteAddress: '127.0.0.1' } })
+
+  // call _resolveAuth directly — the mfaCallbackHandler test above replaces
+  // authCallbackHandler on the shared instance with a stub
+  // (1) unknown email + any password
+  await t.exception(
+    async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-unknown@localhost', password: 'anything' })),
+    /ERR_AUTH_FAIL/,
+    'unknown email yields ERR_AUTH_FAIL'
+  )
+
+  // (2) known email + wrong password
+  await t.exception(
+    async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-known@localhost', password: 'wrong' })),
+    /ERR_AUTH_FAIL/,
+    'wrong password yields ERR_AUTH_FAIL'
+  )
+
+  // (3) known email with no password set + caller provides one
+  await t.exception(
+    async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-nopass@localhost', password: 'anything' })),
+    /ERR_AUTH_FAIL/,
+    'password-not-set yields ERR_AUTH_FAIL (no enumeration)'
+  )
 })
 
 test('H2: getTokenPerms sources roles from users table, not from the token claims', async (t) => {
