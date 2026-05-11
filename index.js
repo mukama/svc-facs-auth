@@ -16,7 +16,16 @@ const lruKeys = {
   jtiData: (jti) => `jti-data:${jti}`,
   goTokens: (token) => `gotokens:${token}`,
   userRoles: (userId) => `user-roles:${userId}`,
-  mfaCsrf: (csrf) => `mfa-csrf:${csrf}`
+  mfaCsrf: (csrf) => `mfa-csrf:${csrf}`,
+  authRl: (email, ip) => `auth-rl:${email}:${ip}`
+}
+
+const DEFAULT_PASSWORD_POLICY = {
+  minLength: 8,
+  requireUpper: false,
+  requireLower: false,
+  requireDigit: false,
+  requireSymbol: false
 }
 
 class AuthFacility extends Base {
@@ -69,10 +78,18 @@ class AuthFacility extends Base {
       throw new Error('ERR_SUPER_ADMIN_MISSING')
     }
 
+    // M6: refuse to bootstrap a passwordless super-admin unless explicitly opted-in
+    if (!this.conf.superAdminPassword && !this.conf.allowPasswordlessSuperAdmin) {
+      throw new Error('ERR_SUPER_ADMIN_PASSWORD_MISSING')
+    }
+    const adminPasswordHash = this.conf.superAdminPassword
+      ? await bcrypt.hash(this.conf.superAdminPassword, this.conf.saltRounds || 10)
+      : null
+
     const user = await this._sqlite.getAsync('SELECT * FROM users WHERE id = 1 LIMIT 1')
     if (!user) {
       await this._sqlite.runAsync(
-        'INSERT INTO users (email, roles) VALUES (?, ?)', [admin, JSON.stringify(['*'])]
+        'INSERT INTO users (email, roles, password) VALUES (?, ?, ?)', [admin, JSON.stringify(['*']), adminPasswordHash]
       )
     } else if (user.email !== admin) {
       const existingUser = await this.getUserByEmail(admin)
@@ -113,6 +130,50 @@ class AuthFacility extends Base {
 
   addMfaCompleteHandlers (handlers) {
     Object.assign(this._mfaCompleteHandlers, handlers)
+  }
+
+  _validatePassword (password) {
+    const policy = { ...DEFAULT_PASSWORD_POLICY, ...(this.conf.passwordPolicy || {}) }
+    if (typeof password !== 'string' || password.length < policy.minLength) {
+      throw new Error('ERR_PASSWORD_POLICY')
+    }
+    if (policy.requireUpper && !/[A-Z]/.test(password)) throw new Error('ERR_PASSWORD_POLICY')
+    if (policy.requireLower && !/[a-z]/.test(password)) throw new Error('ERR_PASSWORD_POLICY')
+    if (policy.requireDigit && !/[0-9]/.test(password)) throw new Error('ERR_PASSWORD_POLICY')
+    if (policy.requireSymbol && !/[^A-Za-z0-9]/.test(password)) throw new Error('ERR_PASSWORD_POLICY')
+  }
+
+  _checkAuthRateLimit (email, ip) {
+    const cfg = this.conf.authRateLimit
+    if (!cfg) return
+    const key = lruKeys.authRl(email || '', ip || '')
+    const entry = this._lru.peek(key)
+    const now = Date.now()
+    if (entry && entry.lockedUntil && entry.lockedUntil > now) {
+      throw new Error('ERR_AUTH_FAIL')
+    }
+  }
+
+  _recordAuthFailure (email, ip) {
+    const cfg = this.conf.authRateLimit
+    if (!cfg) return
+    const key = lruKeys.authRl(email || '', ip || '')
+    const now = Date.now()
+    const winMs = (cfg.window || 60) * 1000
+    let entry = this._lru.peek(key)
+    if (!entry || (now - entry.firstAt) > winMs) {
+      entry = { count: 0, firstAt: now, lockedUntil: 0 }
+    }
+    entry.count += 1
+    if (entry.count >= (cfg.maxAttempts || 5)) {
+      entry.lockedUntil = now + (cfg.lockoutSec || 900) * 1000
+    }
+    this._lru.set(key, entry)
+  }
+
+  _clearAuthRateLimit (email, ip) {
+    if (!this.conf.authRateLimit) return
+    this._lru.remove(lruKeys.authRl(email || '', ip || ''))
   }
 
   _validateRoles (roles) {
@@ -276,6 +337,7 @@ class AuthFacility extends Base {
     }
 
     this._validateRoles(roles)
+    if (password !== null) this._validatePassword(password)
 
     const user = await this._sqlite.getAsync(
       'SELECT * FROM users WHERE email = ? LIMIT 1', email
@@ -309,6 +371,7 @@ class AuthFacility extends Base {
     const isRoleMutation = roles !== null && !isEqual(currentRoles.slice().sort(), roles.slice().sort())
 
     if (roles !== null) this._validateRoles(roles)
+    if (password !== null) this._validatePassword(password)
 
     if ((!isSelf || isRoleMutation) && !(await this.tokenHasPerms(token, 'user:rw'))) {
       throw new Error('ERR_PERMISSION_DENIED')
@@ -589,6 +652,11 @@ class AuthFacility extends Base {
       throw new Error('ERR_EMAIL_INVALID')
     }
 
+    const ips = extractIps(req, this.conf.trustProxy)
+
+    // M5: pre-check rate limit (lockout still active?)
+    this._checkAuthRateLimit(info.email, ips[0])
+
     // read user from table `users`
     const user = await this._sqlite.getAsync(
       'SELECT * FROM users WHERE email = ? LIMIT 1', info.email
@@ -596,6 +664,7 @@ class AuthFacility extends Base {
     if (!user) {
       // constant-time: equalise with the wrong-password branch below
       await bcrypt.compare(info.password || '', this._dummyHash)
+      this._recordAuthFailure(info.email, ips[0])
       throw new Error('ERR_AUTH_FAIL')
     }
 
@@ -603,19 +672,22 @@ class AuthFacility extends Base {
     if (info.password) {
       if (!user.password) {
         await bcrypt.compare(info.password, this._dummyHash)
+        this._recordAuthFailure(info.email, ips[0])
         throw new Error('ERR_AUTH_FAIL')
       }
       if (!await bcrypt.compare(info.password, user.password)) {
+        this._recordAuthFailure(info.email, ips[0])
         throw new Error('ERR_AUTH_FAIL')
       }
     }
+
+    this._clearAuthRateLimit(info.email, ips[0])
 
     const userId = user.id
 
     if (info.password) delete info.password
     if (user.password) delete user.password
     const metadata = { ...info, ...user }
-    const ips = extractIps(req, this.conf.trustProxy)
 
     const roles = []
     if (metadata.roles?.length) {

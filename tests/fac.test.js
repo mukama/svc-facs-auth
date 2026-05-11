@@ -542,6 +542,100 @@ test('updateLastActive', async (t) => {
   t.is(typeof userAfter.lastActiveAt, 'number', 'lastActiveAt is a number')
 })
 
+test('M4: createUser / updateUser enforce password policy', async (t) => {
+  // default policy is minLength: 8
+  await t.exception(
+    async () => await authFac.createUser({ email: 'm4-short@localhost', roles: ['user'], password: 'short' }),
+    /ERR_PASSWORD_POLICY/,
+    'rejects password shorter than min length'
+  )
+
+  // tighten policy and check class requirements
+  const prev = authFac.conf.passwordPolicy
+  authFac.conf.passwordPolicy = { minLength: 10, requireUpper: true, requireDigit: true, requireSymbol: true }
+  try {
+    await t.exception(
+      async () => await authFac.createUser({ email: 'm4-noupper@localhost', roles: ['user'], password: 'alllower1!' }),
+      /ERR_PASSWORD_POLICY/,
+      'rejects missing upper-case'
+    )
+    await t.exception(
+      async () => await authFac.createUser({ email: 'm4-nosym@localhost', roles: ['user'], password: 'NoSymbols1' }),
+      /ERR_PASSWORD_POLICY/,
+      'rejects missing symbol'
+    )
+    await t.execution(
+      async () => await authFac.createUser({ email: 'm4-good@localhost', roles: ['user'], password: 'GoodPass!1' }),
+      'accepts compliant password'
+    )
+  } finally {
+    authFac.conf.passwordPolicy = prev
+  }
+})
+
+test('M5: rate limiting locks the (email, ip) bucket after threshold', async (t) => {
+  // opt in to rate limiting just for this test
+  const prev = authFac.conf.authRateLimit
+  authFac.conf.authRateLimit = { window: 60, maxAttempts: 3, lockoutSec: 60 }
+
+  authFac.addHandlers({
+    'm5-pw': (ctx, req) => {
+      if (!req.email) throw new Error('ERR_MISSING_EMAIL')
+      return req
+    }
+  })
+
+  await authFac.createUser({ email: 'm5-target@localhost', roles: ['user'], password: 'CorrectPass1!' })
+
+  const req = (body) => ({ ...body, socket: { remoteAddress: '10.0.0.5' } })
+  try {
+    // 3 wrong-password attempts to hit the threshold
+    for (let i = 0; i < 3; i++) {
+      await t.exception(
+        async () => await authFac._resolveAuth('m5-pw', req({ email: 'm5-target@localhost', password: 'wrong' })),
+        /ERR_AUTH_FAIL/,
+        `attempt ${i + 1} fails`
+      )
+    }
+
+    // 4th attempt should hit the lockout — even with the CORRECT password
+    await t.exception(
+      async () => await authFac._resolveAuth('m5-pw', req({ email: 'm5-target@localhost', password: 'CorrectPass1!' })),
+      /ERR_AUTH_FAIL/,
+      'lockout blocks even correct password'
+    )
+
+    // different IP — fresh bucket, succeeds
+    const reqOther = (body) => ({ ...body, socket: { remoteAddress: '10.0.0.6' } })
+    const token = await authFac._resolveAuth('m5-pw', reqOther({ email: 'm5-target@localhost', password: 'CorrectPass1!' }))
+    t.ok(token, 'different IP gets a fresh bucket')
+  } finally {
+    authFac.conf.authRateLimit = prev
+  }
+})
+
+test('M6: _initDb rejects passwordless super-admin without explicit opt-in', async (t) => {
+  const fac = new Fac(caller, {
+    sqlite: require('./helper/sqlite.fac')(),
+    ns: 'a0',
+    lru: require('./helper/lru.fac')()
+  }, { env: 'test' })
+  await new Promise(resolve => fac.start(resolve))
+
+  // Remove both knobs and re-run _initDb — should refuse to boot
+  fac.conf.superAdminPassword = undefined
+  fac.conf.allowPasswordlessSuperAdmin = false
+  await t.exception(
+    async () => await fac._initDb(),
+    /ERR_SUPER_ADMIN_PASSWORD_MISSING/,
+    'refuses to bootstrap when both flags are missing'
+  )
+
+  // Setting superAdminPassword permits boot
+  fac.conf.superAdminPassword = 'StrongAdminPw!1'
+  await t.execution(async () => await fac._initDb(), 'boots with superAdminPassword set')
+})
+
 test('M7: revokeToken + revokeAllForUser invalidate sessions', async (t) => {
   await authFac.createUser({ email: 'm7@localhost', roles: ['user'] })
   const user = await authFac._sqlite.getAsync('SELECT * FROM users WHERE email = ?', 'm7@localhost')

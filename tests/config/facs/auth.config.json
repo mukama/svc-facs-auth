@@ -2,6 +2,7 @@
   "a0": {
     "ttl": 3000,
     "superAdmin": "superadmin@localhost",
+    "allowPasswordlessSuperAdmin": true,
     "roles": {
       "admin": [
         "miner:rw",
