@@ -171,9 +171,9 @@ test('tokenPerms', async (t) => {
   })
 
   // check if token has correct permissions
-  t.is(authFac.tokenHasPerms(token, 'jobs:r'), true, 'token has jobs:r')
-  t.is(authFac.tokenHasPerms(token, 'jobs:w'), true, 'token has jobs:w')
-  t.not(authFac.tokenHasPerms(token, 'miner:r'), true, 'token does not have miner:r')
+  t.is(await authFac.tokenHasPerms(token, 'jobs:r'), true, 'token has jobs:r')
+  t.is(await authFac.tokenHasPerms(token, 'jobs:w'), true, 'token has jobs:w')
+  t.not(await authFac.tokenHasPerms(token, 'miner:r'), true, 'token does not have miner:r')
 
   // check if superadmin token has all permissions
   const superAdminToken = await authFac.genToken({
@@ -182,8 +182,8 @@ test('tokenPerms', async (t) => {
     roles: ['*']
   })
 
-  t.is(authFac.tokenHasPerms(superAdminToken, 'jobs:r'), true, 'superadmin token has jobs:r')
-  t.is(authFac.tokenHasPerms(superAdminToken, 'jobs:xyz'), true, 'superadmin token has unknown permission')
+  t.is(await authFac.tokenHasPerms(superAdminToken, 'jobs:r'), true, 'superadmin token has jobs:r')
+  t.is(await authFac.tokenHasPerms(superAdminToken, 'jobs:xyz'), true, 'superadmin token has unknown permission')
 })
 
 test('updateUser', async (t) => {
@@ -531,6 +531,28 @@ test('updateLastActive', async (t) => {
   const userAfter = await authFac.getUserById(user.id)
   t.ok(userAfter.lastActiveAt, 'lastActiveAt is set after update')
   t.is(typeof userAfter.lastActiveAt, 'number', 'lastActiveAt is a number')
+})
+
+test('H2: getTokenPerms sources roles from users table, not from the token claims', async (t) => {
+  await authFac.createUser({ email: 'h2@localhost', roles: ['user'] })
+  const user = await authFac._sqlite.getAsync('SELECT * FROM users WHERE email = ?', 'h2@localhost')
+  const token = await authFac.genToken({ ips: ['127.0.0.1'], userId: user.id, roles: ['user'] })
+
+  t.ok(await authFac.tokenHasPerms(token, 'jobs:r'), 'jobs:r granted initially (user role)')
+  t.absent(await authFac.tokenHasPerms(token, 'miner:r'), 'miner:r not granted initially')
+
+  // Promote the user to admin in the DB and invalidate the role cache
+  await authFac._sqlite.runAsync('UPDATE users SET roles = ? WHERE id = ?', [JSON.stringify(['admin']), user.id])
+  authFac._lru.remove(`user-roles:${user.id}`)
+
+  // The same un-rotated token now reflects the live DB role assignment
+  t.ok(await authFac.tokenHasPerms(token, 'miner:r'), 'miner:r granted after DB role promotion')
+  t.ok(await authFac.tokenHasPerms(token, 'user:rw'), 'user:rw granted after DB role promotion')
+
+  // Demote in DB, invalidate cache — perms drop again on next check
+  await authFac._sqlite.runAsync('UPDATE users SET roles = ? WHERE id = ?', [JSON.stringify(['user']), user.id])
+  authFac._lru.remove(`user-roles:${user.id}`)
+  t.absent(await authFac.tokenHasPerms(token, 'miner:r'), 'miner:r dropped after DB demotion')
 })
 
 test('C2 + L2: legacy token format and regex validation', async (t) => {

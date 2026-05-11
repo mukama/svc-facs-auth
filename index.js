@@ -14,7 +14,8 @@ const JWT_ALGORITHM = 'HS256'
 const lruKeys = {
   userJtis: (userId) => `user-jtis:${userId}`,
   jtiData: (jti) => `jti-data:${jti}`,
-  goTokens: (token) => `gotokens:${token}`
+  goTokens: (token) => `gotokens:${token}`,
+  userRoles: (userId) => `user-roles:${userId}`
 }
 
 class AuthFacility extends Base {
@@ -105,10 +106,24 @@ class AuthFacility extends Base {
   async _requireSelfOrPerm (token, targetUserId, perm) {
     const { userId } = await this._verifyToken(token)
     if (userId === targetUserId) return userId
-    if (!this.tokenHasPerms(token, perm)) {
+    if (!(await this.tokenHasPerms(token, perm))) {
       throw new Error('ERR_PERMISSION_DENIED')
     }
     return userId
+  }
+
+  async _getUserRolesCached (userId) {
+    const key = lruKeys.userRoles(userId)
+    const ttlMs = (this.conf.rolesCacheTtl || 30) * 1000
+    const cached = this._lru.peek(key)
+    if (cached && (Date.now() - cached.at) < ttlMs) {
+      return cached.roles
+    }
+    const row = await this._sqlite.getAsync('SELECT roles FROM users WHERE id = ? LIMIT 1', userId)
+    if (!row) return []
+    const roles = JSON.parse(row.roles || '[]')
+    this._lru.set(key, { roles, at: Date.now() })
+    return roles
   }
 
   _validateTokenOpts ({ ips, userId, ttl, metadata, pfx, scope, roles }) {
@@ -273,7 +288,7 @@ class AuthFacility extends Base {
 
     if (roles !== null) this._validateRoles(roles)
 
-    if ((!isSelf || isRoleMutation) && !this.tokenHasPerms(token, 'user:rw')) {
+    if ((!isSelf || isRoleMutation) && !(await this.tokenHasPerms(token, 'user:rw'))) {
       throw new Error('ERR_PERMISSION_DENIED')
     }
 
@@ -296,6 +311,7 @@ class AuthFacility extends Base {
       'UPDATE users SET email = ?, name = ?, roles = ?, password = ? WHERE id = ?', [nextEmail, nextName, nextRoles, nextPassword, userId]
     )
 
+    this._lru.remove(lruKeys.userRoles(userId))
     await this._deleteTokensOfUser(userId)
   }
 
@@ -335,7 +351,23 @@ class AuthFacility extends Base {
     return Object.entries(perms).map(([key, val]) => `${key}:${[...val].sort().join('')}`)
   }
 
-  getTokenPerms (token) {
+  async getTokenPerms (token) {
+    let verified
+    try {
+      verified = await this._verifyToken(token)
+    } catch {
+      return { superadmin: false, perms: [] }
+    }
+    const roles = await this._getUserRolesCached(verified.userId)
+    const rolePerms = roles.map(c => c === '*' ? '*' : this.conf.roles[c])
+
+    return {
+      superadmin: rolePerms.includes('*'),
+      perms: this._mergePerms(union(...rolePerms))
+    }
+  }
+
+  getTokenPermsSync (token) {
     const roles = this._getRolesFromToken(token)
     const rolePerms = roles.map(c => c === '*' ? '*' : this.conf.roles[c])
 
@@ -377,8 +409,8 @@ class AuthFacility extends Base {
     await this._sqlite.runAsync('UPDATE users SET lastActiveAt = ? WHERE id = ?', [dateNowSec(), userId])
   }
 
-  tokenHasPerms (token, perm) {
-    const { superadmin, perms } = this.getTokenPerms(token)
+  async tokenHasPerms (token, perm) {
+    const { superadmin, perms } = await this.getTokenPerms(token)
 
     if (superadmin) {
       return true
@@ -586,6 +618,7 @@ class AuthFacility extends Base {
       'DELETE from users WHERE id=?', [id]
     )
 
+    this._lru.remove(lruKeys.userRoles(id))
     await this._deleteTokensOfUser(id)
 
     return true
