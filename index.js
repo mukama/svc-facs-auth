@@ -58,8 +58,8 @@ class AuthFacility extends Base {
       await this._sqlite.execAsync(tbl)
     })
 
-    const authTokensCols = await this._sqlite.allAsync('PRAGMA table_info(auth_tokens)')
-    if (authTokensCols.find(c => c.name === 'token')) {
+    const sample = await this._sqlite.getAsync('SELECT token FROM auth_tokens LIMIT 1')
+    if (sample && !/^[a-f0-9]{64}$/.test(sample.token)) {
       await this._sqlite.execAsync('DROP TABLE auth_tokens')
       const authTokensSchema = TABLES.find(t => t.includes('CREATE TABLE IF NOT EXISTS auth_tokens'))
       await this._sqlite.execAsync(authTokensSchema)
@@ -267,7 +267,7 @@ class AuthFacility extends Base {
     const token = `${pfx}:${scope}:${crypto.randomUUID()}-${userId}${strRoles}`
 
     await this._sqlite.runAsync(
-      'INSERT INTO auth_tokens(token_hash, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT INTO auth_tokens(token, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
       [this._hashToken(token), userId, JSON.stringify(ips), JSON.stringify(metadata), dateNowSec(), ttl]
     )
 
@@ -560,7 +560,7 @@ class AuthFacility extends Base {
 
     if (!res) {
       res = await this._sqlite.getAsync(
-        'SELECT * FROM auth_tokens WHERE token_hash = ? LIMIT 1',
+        'SELECT * FROM auth_tokens WHERE token = ? LIMIT 1',
         hash)
 
       if (res) {
@@ -756,7 +756,7 @@ class AuthFacility extends Base {
     } else {
       const hash = this._hashToken(token)
       this._lru.remove(lruKeys.goTokens(hash))
-      await this._sqlite.runAsync('DELETE FROM auth_tokens WHERE token_hash = ?', hash)
+      await this._sqlite.runAsync('DELETE FROM auth_tokens WHERE token = ?', hash)
     }
     return true
   }
@@ -790,10 +790,10 @@ class AuthFacility extends Base {
 
   async _revokeDbUserTokens (userId) {
     const rows = await this._sqlite.allAsync(
-      'SELECT token_hash from auth_tokens WHERE userId=?', [userId]
+      'SELECT token from auth_tokens WHERE userId=?', [userId]
     )
 
-    rows.forEach(row => this._lru.remove(lruKeys.goTokens(row.token_hash)))
+    rows.forEach(row => this._lru.remove(lruKeys.goTokens(row.token)))
 
     await this._sqlite.allAsync(
       'DELETE from auth_tokens WHERE userId=?', [userId]

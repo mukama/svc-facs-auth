@@ -431,7 +431,7 @@ test('cleanupTokens', async (t) => {
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex')
 
   let authTokens = await authFac._sqlite.allAsync(
-    'SELECT * FROM auth_tokens WHERE token_hash = ?', tokenHash
+    'SELECT * FROM auth_tokens WHERE token = ?', tokenHash
   )
 
   t.is(authTokens.length, 1, 'token created')
@@ -444,7 +444,7 @@ test('cleanupTokens', async (t) => {
 
   // check if token is deleted
   authTokens = await authFac._sqlite.allAsync(
-    'SELECT * FROM auth_tokens WHERE token_hash = ?', tokenHash
+    'SELECT * FROM auth_tokens WHERE token = ?', tokenHash
   )
 
   t.is(authTokens.length, 0, 'token deleted')
@@ -767,7 +767,7 @@ test('C2: token format regex validation', async (t) => {
   t.is(await authFac._getTokenFromDb(null), null, 'rejects non-string token')
 
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex')
-  const row = await authFac._sqlite.getAsync('SELECT userId FROM auth_tokens WHERE token_hash = ?', tokenHash)
+  const row = await authFac._sqlite.getAsync('SELECT userId FROM auth_tokens WHERE token = ?', tokenHash)
   t.is(row.userId, 9, 'userId tracked in DB column')
 })
 
