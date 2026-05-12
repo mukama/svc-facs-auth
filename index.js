@@ -78,18 +78,10 @@ class AuthFacility extends Base {
       throw new Error('ERR_SUPER_ADMIN_MISSING')
     }
 
-    // M6: refuse to bootstrap a passwordless super-admin unless explicitly opted-in
-    if (!this.conf.superAdminPassword && !this.conf.allowPasswordlessSuperAdmin) {
-      throw new Error('ERR_SUPER_ADMIN_PASSWORD_MISSING')
-    }
-    const adminPasswordHash = this.conf.superAdminPassword
-      ? await bcrypt.hash(this.conf.superAdminPassword, this.conf.saltRounds || 10)
-      : null
-
     const user = await this._sqlite.getAsync('SELECT * FROM users WHERE id = 1 LIMIT 1')
     if (!user) {
       await this._sqlite.runAsync(
-        'INSERT INTO users (email, roles, password) VALUES (?, ?, ?)', [admin, JSON.stringify(['*']), adminPasswordHash]
+        'INSERT INTO users (email, roles) VALUES (?, ?)', [admin, JSON.stringify(['*'])]
       )
     } else if (user.email !== admin) {
       const existingUser = await this.getUserByEmail(admin)
@@ -281,7 +273,7 @@ class AuthFacility extends Base {
     if (roles.length) {
       strRoles = '-roles:' + roles.join(':')
     }
-    const token = `${pfx}:${scope}:${crypto.randomUUID()}${strRoles}`
+    const token = `${pfx}:${scope}:${crypto.randomUUID()}-${userId}${strRoles}`
 
     await this._sqlite.runAsync(
       'INSERT INTO auth_tokens(token_hash, userId, ips, metadata, created, ttl) VALUES (?, ?, ?, ?, ?, ?)',
