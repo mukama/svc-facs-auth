@@ -92,12 +92,12 @@ test('createToken', async (t) => {
   const token = await authFac.genToken({
     ips: ['127.0.0.1'],
     userId: 2,
-    roles: ['normal_user']
+    roles: ['user']
   })
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:normal_user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:user'
   // match all except uuid with regex
-  t.is(token.match(/pub:api:[a-z0-9-]*-roles:normal_user/)[0], token, 'valid token created')
+  t.is(token.match(/pub:api:[a-z0-9-]*-roles:user/)[0], token, 'valid token created')
 })
 
 test('regenerateToken', async (t) => {
@@ -390,33 +390,38 @@ test('mfaHandler', async t => {
 })
 
 test('mfaCallbackHandler', async t => {
-  // No MFA required
-  authFac.authCallbackHandler = async () => 'token123'
-  const getUserMfaMethodsNone = async () => []
-  const resultNone = await authFac.mfaCallbackHandler('any', {}, getUserMfaMethodsNone)
-  t.alike(resultNone, { token: 'token123' })
+  const originalAuthCallbackHandler = authFac.authCallbackHandler
+  try {
+    // No MFA required
+    authFac.authCallbackHandler = async () => 'token123'
+    const getUserMfaMethodsNone = async () => []
+    const resultNone = await authFac.mfaCallbackHandler('any', {}, getUserMfaMethodsNone)
+    t.alike(resultNone, { token: 'token123' })
 
-  // MFA required
-  authFac.authCallbackHandler = async () => 'token456'
-  const getUserMfaMethodsSome = async () => ['totp', 'passkey']
-  const resultSome = await authFac.mfaCallbackHandler('any', {}, getUserMfaMethodsSome)
-  t.ok(resultSome.csrf_token)
-  t.is(resultSome.mfa_required, true)
-  t.alike(resultSome.mfa_methods, ['totp', 'passkey'])
-  const csrfEntry = authFac._lru.get(`mfa-csrf:${resultSome.csrf_token}`)
-  t.is(csrfEntry.token, 'token456')
-  t.ok(typeof csrfEntry.createdAt === 'number')
+    // MFA required
+    authFac.authCallbackHandler = async () => 'token456'
+    const getUserMfaMethodsSome = async () => ['totp', 'passkey']
+    const resultSome = await authFac.mfaCallbackHandler('any', {}, getUserMfaMethodsSome)
+    t.ok(resultSome.csrf_token)
+    t.is(resultSome.mfa_required, true)
+    t.alike(resultSome.mfa_methods, ['totp', 'passkey'])
+    const csrfEntry = authFac._lru.get(`mfa-csrf:${resultSome.csrf_token}`)
+    t.is(csrfEntry.token, 'token456')
+    t.ok(typeof csrfEntry.createdAt === 'number')
 
-  // Invalid getUserMfaMethods
-  authFac.authCallbackHandler = async () => 'token789'
-  await t.exception(
-    async () => await authFac.mfaCallbackHandler('any', {}, null),
-    /ERR_MFA_METHOD_HANDLER_INVALID/
-  )
-  await t.exception(
-    async () => await authFac.mfaCallbackHandler('any', {}, 123),
-    /ERR_MFA_METHOD_HANDLER_INVALID/
-  )
+    // Invalid getUserMfaMethods
+    authFac.authCallbackHandler = async () => 'token789'
+    await t.exception(
+      async () => await authFac.mfaCallbackHandler('any', {}, null),
+      /ERR_MFA_METHOD_HANDLER_INVALID/
+    )
+    await t.exception(
+      async () => await authFac.mfaCallbackHandler('any', {}, 123),
+      /ERR_MFA_METHOD_HANDLER_INVALID/
+    )
+  } finally {
+    authFac.authCallbackHandler = originalAuthCallbackHandler
+  }
 })
 
 test('cleanupTokens', async (t) => {
@@ -492,7 +497,7 @@ test('deleteUser', async (t) => {
   await async.times(3, async () => authFac.genToken({
     ips: ['127.0.0.1'],
     userId: user.id,
-    roles: ['normal_user']
+    roles: ['user']
   }))
 
   const tokens = await authFac._sqlite.allAsync(
@@ -604,20 +609,20 @@ test('M5: rate limiting locks the (email, ip) bucket after threshold', async (t)
   try {
     for (let i = 0; i < 3; i++) {
       await t.exception(
-        async () => await authFac._resolveAuth('m5-pw', req({ email: 'm5-target@localhost', password: 'wrong' })),
+        async () => await authFac.authCallbackHandler('m5-pw', req({ email: 'm5-target@localhost', password: 'wrong' })),
         /ERR_AUTH_FAIL/,
         `attempt ${i + 1} fails`
       )
     }
 
     await t.exception(
-      async () => await authFac._resolveAuth('m5-pw', req({ email: 'm5-target@localhost', password: 'CorrectPass1!' })),
+      async () => await authFac.authCallbackHandler('m5-pw', req({ email: 'm5-target@localhost', password: 'CorrectPass1!' })),
       /ERR_AUTH_FAIL/,
       'lockout blocks even correct password'
     )
 
     const reqOther = (body) => ({ ...body, socket: { remoteAddress: '10.0.0.6' } })
-    const token = await authFac._resolveAuth('m5-pw', reqOther({ email: 'm5-target@localhost', password: 'CorrectPass1!' }))
+    const token = await authFac.authCallbackHandler('m5-pw', reqOther({ email: 'm5-target@localhost', password: 'CorrectPass1!' }))
     t.ok(token, 'different IP gets a fresh bucket')
   } finally {
     authFac.conf.authRateLimit = prev
@@ -716,19 +721,19 @@ test('H3: auth failures collapse to ERR_AUTH_FAIL; dummy hash is initialised', a
   const req = (body) => ({ ...body, socket: { remoteAddress: '127.0.0.1' } })
 
   await t.exception(
-    async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-unknown@localhost', password: 'anything' })),
+    async () => await authFac.authCallbackHandler('h3-pw', req({ email: 'h3-unknown@localhost', password: 'anything' })),
     /ERR_AUTH_FAIL/,
     'unknown email yields ERR_AUTH_FAIL'
   )
 
   await t.exception(
-    async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-known@localhost', password: 'wrong' })),
+    async () => await authFac.authCallbackHandler('h3-pw', req({ email: 'h3-known@localhost', password: 'wrong' })),
     /ERR_AUTH_FAIL/,
     'wrong password yields ERR_AUTH_FAIL'
   )
 
   await t.exception(
-    async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-nopass@localhost', password: 'anything' })),
+    async () => await authFac.authCallbackHandler('h3-pw', req({ email: 'h3-nopass@localhost', password: 'anything' })),
     /ERR_AUTH_FAIL/,
     'password-not-set yields ERR_AUTH_FAIL (no enumeration)'
   )
@@ -905,13 +910,13 @@ test('jwt: genToken returns HS256 JWT with expected claims', async (t) => {
   const token = await jwtAuthFac.genToken({
     ips: ['127.0.0.1'],
     userId: 2,
-    roles: ['normal_user']
+    roles: ['user']
   })
 
   const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] })
   t.is(decoded.sub, 2, 'sub claim is userId')
   t.is(decoded.iss, undefined, 'iss claim absent when jwtIssuer not configured')
-  t.alike(decoded.roles, ['normal_user'], 'roles claim matches')
+  t.alike(decoded.roles, ['user'], 'roles claim matches')
   t.is(decoded.ips, undefined, 'ips not embedded in JWT (kept server-side)')
   t.is(decoded.metadata, undefined, 'metadata not embedded in JWT (kept server-side)')
   t.ok(decoded.jti, 'jti claim present')
@@ -925,7 +930,7 @@ test('jwt: issuer is opt-in via conf.jwtIssuer', async (t) => {
     const token = await jwtAuthFac.genToken({
       ips: ['127.0.0.1'],
       userId: 2,
-      roles: ['normal_user']
+      roles: ['user']
     })
 
     const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], issuer: 'my-app' })
@@ -947,7 +952,7 @@ test('jwt: resolveToken accepts a valid token and rejects a tampered one', async
   const token = await jwtAuthFac.genToken({
     ips: ['127.0.0.1'],
     userId: 2,
-    roles: ['normal_user']
+    roles: ['user']
   })
 
   const res = await jwtAuthFac.resolveToken(token, ['127.0.0.1'])
@@ -960,7 +965,7 @@ test('jwt: resolveToken accepts a valid token and rejects a tampered one', async
 })
 
 test('jwt: updateUser revokes prior tokens', async (t) => {
-  await jwtAuthFac.createUser({ email: 'jwt-user@localhost', roles: ['normal_user'] })
+  await jwtAuthFac.createUser({ email: 'jwt-user@localhost', roles: ['user'] })
   const user = await jwtAuthFac._sqlite.getAsync(
     'SELECT * FROM users WHERE email = ?', 'jwt-user@localhost'
   )
@@ -970,14 +975,14 @@ test('jwt: updateUser revokes prior tokens', async (t) => {
     tokens.push(await jwtAuthFac.genToken({
       ips: ['127.0.0.1'],
       userId: user.id,
-      roles: ['normal_user']
+      roles: ['user']
     }))
   }
 
   await jwtAuthFac.updateUser({
     token: tokens[0],
     email: 'jwt-user2@localhost',
-    roles: ['normal_user']
+    roles: ['user']
   })
 
   for (const tk of tokens) {

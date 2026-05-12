@@ -13,8 +13,7 @@
         "container:rw",
         "user:r"
       ],
-      "user": ["jobs:rw"],
-      "normal_user": ["jobs:r"]
+      "user": ["jobs:rw"]
     }
   }
 }
