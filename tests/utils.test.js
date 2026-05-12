@@ -15,7 +15,6 @@ test('utils', async (t) => {
   t.test('extractIps (default: trustProxy=false, socket only)', async (t) => {
     t.alike(extractIps({ socket: { remoteAddress: '3.3.3.3' } }), ['3.3.3.3'], 'reads IP from req.socket.remoteAddress')
 
-    // C3: spoofed X-Forwarded-For is ignored by default
     const spoofed = {
       headers: { 'x-forwarded-for': '1.2.3.4' },
       ip: '5.6.7.8',

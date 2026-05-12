@@ -58,11 +58,6 @@ class AuthFacility extends Base {
       await this._sqlite.execAsync(tbl)
     })
 
-    // M1 migration: if auth_tokens still carries the legacy `token` column
-    // (pre-M1 plaintext storage), drop and recreate with the token_hash
-    // schema. Any in-flight legacy-mode tokens are invalidated — clients
-    // re-authenticate on next call. JWT-mode deployments are unaffected
-    // (auth_tokens is unused).
     const authTokensCols = await this._sqlite.allAsync('PRAGMA table_info(auth_tokens)')
     if (authTokensCols.find(c => c.name === 'token')) {
       await this._sqlite.execAsync('DROP TABLE auth_tokens')
@@ -96,10 +91,6 @@ class AuthFacility extends Base {
   }
 
   async _updateDbFromSchema () {
-    // M3: build the whitelist of legal identifiers from the hardcoded
-    // TABLES schema, then assert every interpolated name is in it. The
-    // values come from a static module today; the whitelist is defence
-    // in depth in case anyone later sources TABLES dynamically.
     const schema = TABLES.map(sql => parseSql(sql))
     const validNames = new Set()
     for (const { table, columns } of schema) {
@@ -406,12 +397,6 @@ class AuthFacility extends Base {
     await this._deleteTokensOfUser(userId)
   }
 
-  /**
-   * Compare fields against the caller's own user record by default.
-   * Pass an explicit targetUserId to compare against another user — the
-   * caller must hold `user:r` to do so. Without targetUserId, scope is
-   * implicit (self) and no extra permission is required.
-   */
   async compareUser ({ token, targetUserId = null, email = null, name = null, roles = null, password = null }) {
     const verified = await this._verifyToken(token)
     const callerUserId = verified.userId
@@ -630,7 +615,6 @@ class AuthFacility extends Base {
   async mfaCompleteHandler (csrfToken, factor, proof) {
     const key = lruKeys.mfaCsrf(csrfToken)
     const entry = this._lru.get(key)
-    // Always consume the csrf_token entry — single-use, even on factor failure
     if (entry) this._lru.remove(key)
 
     const ttlMs = (this.conf.mfaCsrfTtl || 300) * 1000
@@ -672,7 +656,6 @@ class AuthFacility extends Base {
 
     const ips = extractIps(req, this.conf.trustProxy)
 
-    // M5: pre-check rate limit (lockout still active?)
     this._checkAuthRateLimit(info.email, ips[0])
 
     // read user from table `users`
@@ -680,7 +663,6 @@ class AuthFacility extends Base {
       'SELECT * FROM users WHERE email = ? LIMIT 1', info.email
     )
     if (!user) {
-      // constant-time: equalise with the wrong-password branch below
       await bcrypt.compare(info.password || '', this._dummyHash)
       this._recordAuthFailure(info.email, ips[0])
       throw new Error('ERR_AUTH_FAIL')

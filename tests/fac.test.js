@@ -95,7 +95,7 @@ test('createToken', async (t) => {
     roles: ['normal_user']
   })
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:normal_user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:normal_user'
   // match all except uuid with regex
   t.is(token.match(/pub:api:[a-z0-9-]*-roles:normal_user/)[0], token, 'valid token created')
 })
@@ -111,7 +111,7 @@ test('regenerateToken', async (t) => {
   // regenerate token with correct old token
   const newToken = await authFac.regenerateToken({ oldToken, ips: ['127.0.0.1'], roles: ['user', 'site_manager'] })
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:user'
   // match all except uuid with regex
   t.is(newToken.match(/pub:api:[a-z0-9-]*-roles:user:site_manager/)[0], newToken, 'valid token regenerated')
 
@@ -129,21 +129,18 @@ test('regenerateToken', async (t) => {
     'throw error on incorrect roles'
   )
 
-  // H1: regenerate from a non-bound IP is rejected
   await t.exception(
     async () => await authFac.regenerateToken({ oldToken, ips: ['8.8.8.8'], roles: ['user'] }),
     /ERR_IP_MISMATCH/,
     'throw error when calling IP not in token binding'
   )
 
-  // H1: regenerate without ips and without req is rejected
   await t.exception(
     async () => await authFac.regenerateToken({ oldToken, roles: ['user'] }),
     /ERR_IPS_REQUIRED/,
     'throw error when neither ips nor req supplied'
   )
 
-  // H1: req-derived IP path works
   const reqOk = { socket: { remoteAddress: '127.0.0.1' } }
   await t.execution(
     async () => await authFac.regenerateToken({ oldToken, req: reqOk, roles: ['user'] }),
@@ -351,11 +348,11 @@ test('authHandlers', async (t) => {
   // create a token with correct email and password
   const token = await authFac.authCallbackHandler('password', reqWithSocket({ email: 'test3@localhost', password: 'newpassword' }))
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:user'
   // match all except uuid with regex
   t.is(token.match(/pub:api:[a-z0-9-]*-roles:user/)[0], token, 'valid token created with password auth handler')
 
-  // throw error in wrong password (H3: collapsed to ERR_AUTH_FAIL)
+  // throw error in wrong password
   await t.exception(
     async () => await authFac.authCallbackHandler('password', reqWithSocket({ email: 'test3@localhost', password: 'incorrect' })),
     /ERR_AUTH_FAIL/,
@@ -365,11 +362,11 @@ test('authHandlers', async (t) => {
   // create a valid token with non-password auth handler
   const token2 = await authFac.authCallbackHandler('nonPassword', reqWithSocket({ email: 'test3@localhost' }))
 
-  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-roles:user'
+  // Token should be like 'pub:api:60f410c1-ea10-4ec8-95e0-bf06be87858d-2-roles:user'
   // match all except uuid with regex
   t.is(token2.match(/pub:api:[a-z0-9-]*-roles:user/)[0], token2, 'valid token created with non-password auth handler')
 
-  // create a token with incorrect email and password (H3: collapsed to ERR_AUTH_FAIL)
+  // create a token with incorrect email and password
   await t.exception(
     async () => await authFac.authCallbackHandler('password', reqWithSocket({ email: 'test100@localhost', password: 'incorrect' })),
     /ERR_AUTH_FAIL/,
@@ -406,7 +403,6 @@ test('mfaCallbackHandler', async t => {
   t.ok(resultSome.csrf_token)
   t.is(resultSome.mfa_required, true)
   t.alike(resultSome.mfa_methods, ['totp', 'passkey'])
-  // H5: csrf_token entry is now namespaced and wraps the token with a createdAt timestamp
   const csrfEntry = authFac._lru.get(`mfa-csrf:${resultSome.csrf_token}`)
   t.is(csrfEntry.token, 'token456')
   t.ok(typeof csrfEntry.createdAt === 'number')
@@ -434,14 +430,12 @@ test('cleanupTokens', async (t) => {
 
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex')
 
-  // check if token is created (stored as token_hash, not raw)
   let authTokens = await authFac._sqlite.allAsync(
     'SELECT * FROM auth_tokens WHERE token_hash = ?', tokenHash
   )
 
   t.is(authTokens.length, 1, 'token created')
 
-  // M1: ensure the raw token is NOT stored anywhere in the row
   t.absent(JSON.stringify(authTokens[0]).includes(token), 'raw token not persisted in DB')
 
   // wait 6s and cleanup tokens
@@ -554,27 +548,23 @@ test('L4: bounded LRU helper evicts when full', (t) => {
   t.is(lru.get('b'), 2, 'middle entry kept')
   t.is(lru.get('c'), 3, 'newest entry kept')
 
-  // touching 'b' should bump it; setting a new key evicts the now-oldest 'c'
   lru.get('b')
   lru.set('d', 4)
   t.is(lru.get('c'), undefined, 'oldest after touch evicted')
   t.is(lru.get('b'), 2, 'recently-touched entry kept')
   t.is(lru.get('d'), 4, 'new entry kept')
 
-  // cache.maxAge is exposed so _assertTtlCoveredByLru can read it
   const lru2 = lruFactory({ maxAge: 60000 })
   t.is(lru2.cache.maxAge, 60000, 'cache.maxAge exposed for boot-time assertion')
 })
 
 test('M4: createUser / updateUser enforce password policy', async (t) => {
-  // default policy is minLength: 8
   await t.exception(
     async () => await authFac.createUser({ email: 'm4-short@localhost', roles: ['user'], password: 'short' }),
     /ERR_PASSWORD_POLICY/,
     'rejects password shorter than min length'
   )
 
-  // tighten policy and check class requirements
   const prev = authFac.conf.passwordPolicy
   authFac.conf.passwordPolicy = { minLength: 10, requireUpper: true, requireDigit: true, requireSymbol: true }
   try {
@@ -598,7 +588,6 @@ test('M4: createUser / updateUser enforce password policy', async (t) => {
 })
 
 test('M5: rate limiting locks the (email, ip) bucket after threshold', async (t) => {
-  // opt in to rate limiting just for this test
   const prev = authFac.conf.authRateLimit
   authFac.conf.authRateLimit = { window: 60, maxAttempts: 3, lockoutSec: 60 }
 
@@ -613,7 +602,6 @@ test('M5: rate limiting locks the (email, ip) bucket after threshold', async (t)
 
   const req = (body) => ({ ...body, socket: { remoteAddress: '10.0.0.5' } })
   try {
-    // 3 wrong-password attempts to hit the threshold
     for (let i = 0; i < 3; i++) {
       await t.exception(
         async () => await authFac._resolveAuth('m5-pw', req({ email: 'm5-target@localhost', password: 'wrong' })),
@@ -622,14 +610,12 @@ test('M5: rate limiting locks the (email, ip) bucket after threshold', async (t)
       )
     }
 
-    // 4th attempt should hit the lockout — even with the CORRECT password
     await t.exception(
       async () => await authFac._resolveAuth('m5-pw', req({ email: 'm5-target@localhost', password: 'CorrectPass1!' })),
       /ERR_AUTH_FAIL/,
       'lockout blocks even correct password'
     )
 
-    // different IP — fresh bucket, succeeds
     const reqOther = (body) => ({ ...body, socket: { remoteAddress: '10.0.0.6' } })
     const token = await authFac._resolveAuth('m5-pw', reqOther({ email: 'm5-target@localhost', password: 'CorrectPass1!' }))
     t.ok(token, 'different IP gets a fresh bucket')
@@ -642,17 +628,14 @@ test('M7: revokeToken + revokeAllForUser invalidate sessions', async (t) => {
   await authFac.createUser({ email: 'm7@localhost', roles: ['user'] })
   const user = await authFac._sqlite.getAsync('SELECT * FROM users WHERE email = ?', 'm7@localhost')
 
-  // revokeToken: single-token revocation
   const t1 = await authFac.genToken({ ips: ['127.0.0.1'], userId: user.id, roles: ['user'] })
   t.ok(await authFac.resolveToken(t1, ['127.0.0.1']), 'token resolves before revoke')
   t.is(await authFac.revokeToken(t1), true, 'revokeToken returns true on success')
   t.is(await authFac.resolveToken(t1, ['127.0.0.1']), null, 'token no longer resolves after revoke')
 
-  // revokeToken is idempotent — calling it on an already-revoked token is a no-op
   t.is(await authFac.revokeToken(t1), false, 'revokeToken returns false on already-revoked token')
   t.is(await authFac.revokeToken('not-a-real-token'), false, 'revokeToken returns false on malformed token')
 
-  // revokeAllForUser: mass revocation
   const tokens = []
   for (let i = 0; i < 3; i++) {
     tokens.push(await authFac.genToken({ ips: ['127.0.0.1'], userId: user.id, roles: ['user'] }))
@@ -674,7 +657,6 @@ test('H5: mfaCompleteHandler enforces single-use csrf_token, TTL, and factor pro
     return csrfToken
   }
 
-  // (1) Wrong factor proof — single-use entry consumed, returns ERR_MFA_FACTOR_INVALID
   const csrf1 = issue()
   await t.exception(
     async () => await authFac.mfaCompleteHandler(csrf1, 'totp', 'wrong'),
@@ -683,21 +665,18 @@ test('H5: mfaCompleteHandler enforces single-use csrf_token, TTL, and factor pro
   )
   t.absent(authFac._lru.get(`mfa-csrf:${csrf1}`), 'csrf entry consumed even on factor failure')
 
-  // (2) Replay of the same csrf_token (now consumed) fails with ERR_MFA_CSRF_INVALID
   await t.exception(
     async () => await authFac.mfaCompleteHandler(csrf1, 'totp', '123456'),
     /ERR_MFA_CSRF_INVALID/,
     'replay after consumption rejected'
   )
 
-  // (3) Unknown csrf_token is rejected
   await t.exception(
     async () => await authFac.mfaCompleteHandler('00000000-0000-0000-0000-000000000000', 'totp', '123456'),
     /ERR_MFA_CSRF_INVALID/,
     'unknown csrf_token rejected'
   )
 
-  // (4) Expired csrf_token (createdAt older than mfaCsrfTtl) is rejected
   const csrf4 = crypto.randomUUID()
   authFac._lru.set(`mfa-csrf:${csrf4}`, { token: 'stale', createdAt: Date.now() - 10 * 60 * 1000 })
   await t.exception(
@@ -706,14 +685,11 @@ test('H5: mfaCompleteHandler enforces single-use csrf_token, TTL, and factor pro
     'expired csrf_token rejected'
   )
 
-  // (5) Happy path — correct proof releases the bearer token
   const csrf5 = issue()
   const result = await authFac.mfaCompleteHandler(csrf5, 'totp', '123456')
   t.is(result.token, 'final-bearer', 'returns the stashed bearer token')
   t.absent(authFac._lru.get(`mfa-csrf:${csrf5}`), 'csrf entry consumed on success')
 
-  // (6) Unknown factor — ERR_HANDLER_INVALID (not the same code as csrf/proof issues so the
-  //     caller can distinguish configuration errors from auth failures)
   const csrf6 = issue()
   await t.exception(
     async () => await authFac.mfaCompleteHandler(csrf6, 'passkey', 'whatever'),
@@ -723,7 +699,6 @@ test('H5: mfaCompleteHandler enforces single-use csrf_token, TTL, and factor pro
 })
 
 test('H3: auth failures collapse to ERR_AUTH_FAIL; dummy hash is initialised', async (t) => {
-  // _dummyHash is seeded at _start
   t.ok(typeof authFac._dummyHash === 'string' && authFac._dummyHash.startsWith('$2'), 'dummy bcrypt hash initialised at _start')
 
   authFac.addHandlers({
@@ -733,32 +708,25 @@ test('H3: auth failures collapse to ERR_AUTH_FAIL; dummy hash is initialised', a
     }
   })
 
-  // user with a password set
   const password = 'H3-known-password!1'
   await authFac.createUser({ email: 'h3-known@localhost', roles: ['user'], password })
 
-  // user without a password
   await authFac.createUser({ email: 'h3-nopass@localhost', roles: ['user'] })
 
   const req = (body) => ({ ...body, socket: { remoteAddress: '127.0.0.1' } })
 
-  // call _resolveAuth directly — the mfaCallbackHandler test above replaces
-  // authCallbackHandler on the shared instance with a stub
-  // (1) unknown email + any password
   await t.exception(
     async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-unknown@localhost', password: 'anything' })),
     /ERR_AUTH_FAIL/,
     'unknown email yields ERR_AUTH_FAIL'
   )
 
-  // (2) known email + wrong password
   await t.exception(
     async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-known@localhost', password: 'wrong' })),
     /ERR_AUTH_FAIL/,
     'wrong password yields ERR_AUTH_FAIL'
   )
 
-  // (3) known email with no password set + caller provides one
   await t.exception(
     async () => await authFac._resolveAuth('h3-pw', req({ email: 'h3-nopass@localhost', password: 'anything' })),
     /ERR_AUTH_FAIL/,
@@ -774,15 +742,12 @@ test('H2: getTokenPerms sources roles from users table, not from the token claim
   t.ok(await authFac.tokenHasPerms(token, 'jobs:r'), 'jobs:r granted initially (user role)')
   t.absent(await authFac.tokenHasPerms(token, 'miner:r'), 'miner:r not granted initially')
 
-  // Promote the user to admin in the DB and invalidate the role cache
   await authFac._sqlite.runAsync('UPDATE users SET roles = ? WHERE id = ?', [JSON.stringify(['admin']), user.id])
   authFac._lru.remove(`user-roles:${user.id}`)
 
-  // The same un-rotated token now reflects the live DB role assignment
   t.ok(await authFac.tokenHasPerms(token, 'miner:r'), 'miner:r granted after DB role promotion')
   t.ok(await authFac.tokenHasPerms(token, 'user:rw'), 'user:rw granted after DB role promotion')
 
-  // Demote in DB, invalidate cache — perms drop again on next check
   await authFac._sqlite.runAsync('UPDATE users SET roles = ? WHERE id = ?', [JSON.stringify(['user']), user.id])
   authFac._lru.remove(`user-roles:${user.id}`)
   t.absent(await authFac.tokenHasPerms(token, 'miner:r'), 'miner:r dropped after DB demotion')
@@ -796,13 +761,11 @@ test('C2: token format regex validation', async (t) => {
   })
   t.ok(/^pub:api:[a-f0-9-]{36}-9-roles:user$/.test(token), 'token matches expected format pub:api:<uuid>-<userId>-roles:<roles>')
 
-  // C2: garbage tokens are rejected by _getTokenFromDb format check (returns null, not an error)
   t.is(await authFac._getTokenFromDb('not-a-token'), null, 'rejects malformed token')
   t.is(await authFac._getTokenFromDb('p'), null, 'rejects single-char token (old regex bug)')
   t.is(await authFac._getTokenFromDb(''), null, 'rejects empty token')
   t.is(await authFac._getTokenFromDb(null), null, 'rejects non-string token')
 
-  // userId is read from the DB column, not parsed from the string
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex')
   const row = await authFac._sqlite.getAsync('SELECT userId FROM auth_tokens WHERE token_hash = ?', tokenHash)
   t.is(row.userId, 9, 'userId tracked in DB column')
@@ -835,7 +798,6 @@ test('C1 + H4: updateUser role validation, permission gates, and currentPassword
     'SELECT * FROM users WHERE email = ?', 'c1-victim@localhost'
   )
 
-  // Privilege escalation attempt: victim with `user` role tries to set their own roles to '*'
   const victimToken = await authFac.genToken({ ips: ['127.0.0.1'], userId: victim.id, roles: ['user'] })
 
   await t.exception(
@@ -860,7 +822,6 @@ test('C1 + H4: updateUser role validation, permission gates, and currentPassword
     'rejects unknown role in updateUser roles'
   )
 
-  // Self-role-mutation to a different valid role still requires user:rw (`user` role has only jobs:rw)
   await t.exception(
     async () => await authFac.updateUser({
       token: victimToken,
@@ -872,7 +833,6 @@ test('C1 + H4: updateUser role validation, permission gates, and currentPassword
     'self role-mutation denied without user:rw permission'
   )
 
-  // H4: a self-update without currentPassword is rejected when user.password is set
   await t.exception(
     async () => await authFac.updateUser({
       token: victimToken,
@@ -882,7 +842,6 @@ test('C1 + H4: updateUser role validation, permission gates, and currentPassword
     'requires currentPassword when user has password set'
   )
 
-  // H4: wrong currentPassword is rejected
   await t.exception(
     async () => await authFac.updateUser({
       token: victimToken,
@@ -893,7 +852,6 @@ test('C1 + H4: updateUser role validation, permission gates, and currentPassword
     'rejects wrong currentPassword'
   )
 
-  // H4: correct currentPassword + non-role mutation succeeds
   await t.execution(
     async () => await authFac.updateUser({
       token: victimToken,
@@ -903,7 +861,6 @@ test('C1 + H4: updateUser role validation, permission gates, and currentPassword
     'self profile update succeeds with valid currentPassword'
   )
 
-  // C1: a superadmin token (roles ['*']) CAN mutate target user's roles
   const adminToken = await authFac.genToken({ ips: ['127.0.0.1'], userId: 1, roles: ['*'] })
   await t.execution(
     async () => await authFac.updateUser({
@@ -915,7 +872,6 @@ test('C1 + H4: updateUser role validation, permission gates, and currentPassword
     'superadmin can update another user\'s roles'
   )
 
-  // C1: a non-superadmin without user:rw can NOT update another user
   const noPermsToken = await authFac.genToken({ ips: ['127.0.0.1'], userId: 2, roles: ['user'] })
   await t.exception(
     async () => await authFac.updateUser({
@@ -927,8 +883,6 @@ test('C1 + H4: updateUser role validation, permission gates, and currentPassword
     'cross-user update denied without user:rw'
   )
 })
-
-// ---------- JWT mode (conf.jwtSecret set) ----------
 
 const jwt = require('jsonwebtoken')
 const JWT_SECRET = 'test-secret-do-not-use-in-prod'
