@@ -52,7 +52,7 @@ Updates an existing user. Self-updates require `currentPassword` when the user h
 
 **Parameters:**
 - `req<object>`: Object with user update details.
-    - `token<string>`: Authentication token for the caller.
+    - `token<string>`: Authentication token for the user.
     - `targetUserId<number> (optional)`: User id to update. Defaults to caller's own id.
     - `currentPassword<string> (required for self-updates with a password set)`.
     - `email<string>`: Email address of the user.
@@ -72,7 +72,7 @@ Compares user details (email, password, roles) with the stored user information.
 
 **Parameters:**
 - `req<object>`: Object containing user details for comparison.
-    - `token<string>`: Authentication token for the caller.
+    - `token<string>`: Authentication token for the user.
     - `targetUserId<number> (optional)`: Compare another user; caller needs `user:r`.
     - `email<string> (optional)`: Email address to compare.
     - `roles<string[]> (optional)`: Array of roles to compare.
